@@ -1,0 +1,3161 @@
+{
+  "name": "HubSpot Duplicate Cleanup and Lead Routing",
+  "nodes": [
+    {
+      "id": "f3da3aa5-70cc-548d-b68f-31e28e7a76d1",
+      "name": "Note: Start",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -400
+      ],
+      "parameters": {
+        "content": "## 1. Start a run\nNightly schedule (only when SCHEDULE_ENABLED is true) or Run Now, a POST webhook that needs the X-Run-Secret header. Send {\"dryRun\": true} for a report without changes. DRY_RUN is on unless it is \"false\", and the Run Now body can never turn it off. Every setting is checked before any HubSpot call; Run Now gets a 500 that names each problem.",
+        "width": 1340,
+        "height": 1080,
+        "color": 7
+      }
+    },
+    {
+      "id": "42e4f799-7037-5dda-b437-d5d8131ab80d",
+      "name": "Run Now",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hubspot-cleanup-run",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "88524466-e707-589e-9572-2093dfae1221"
+    },
+    {
+      "id": "18e3f63a-ab42-561a-89a3-8dc92570c132",
+      "name": "Run Secret Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cfebc725-7af0-5f38-af9d-03a4996f8dd3",
+              "leftValue": "={{ $env.RUN_NOW_SECRET }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "4baf7551-d65a-56d0-862a-52f427b80539",
+              "leftValue": "={{ $json.headers['x-run-secret'] || '' }}",
+              "rightValue": "={{ $env.RUN_NOW_SECRET }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9d2f11e9-4283-51e9-a1b9-b4eaf0dda693",
+      "name": "Respond: Run Refused",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'unauthorized' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "6c0e0206-f55e-55b2-8876-854779fddf20",
+      "name": "Stop: Bad Run Secret",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "errorMessage": "Run Now was called without the right X-Run-Secret header, so nothing was read or changed. If this was you, check RUN_NOW_SECRET."
+      }
+    },
+    {
+      "id": "5ac26fd3-7d43-5fb2-8297-7ae7daa8cea7",
+      "name": "Schedule: Nightly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        420
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 2,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e65537ab-0d55-5a1a-9ba2-1e0eca51d5ad",
+      "name": "Schedule On?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "53b6f509-b78e-53f6-8a96-9cddd6bc66b0",
+              "leftValue": "={{ String($env.SCHEDULE_ENABLED || '').trim().toLowerCase() }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "452120d4-3293-53a2-9fcd-867748fcb05c",
+      "name": "Run Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Reads and checks every setting before any HubSpot call. Both triggers land here.\n// It never throws: problems are listed, and \"Route Run\" answers a Run Now call with a 500 that names them\n// (a nightly run fails with the same list).\nconst text = v => String(v ?? '').trim();\nconst list = v => text(v).split(',').map(x => x.trim()).filter(Boolean);\nconst normKey = v => String(v ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\nconst problems = [];\n\nconst whole = (name, value, fallback, lo, hi) => {\n  if (text(value) === '') return fallback;\n  const n = Number(text(value));\n  if (!Number.isInteger(n) || n < lo || n > hi) {\n    problems.push(`${name} must be a whole number from ${lo} to ${hi} (it is \"${text(value)}\")`);\n    return fallback;\n  }\n  return n;\n};\nconst decimal = (name, value, fallback, lo, hi) => {\n  if (text(value) === '') return fallback;\n  const n = Number(text(value));\n  if (!Number.isFinite(n) || n < lo || n > hi) {\n    problems.push(`${name} must be a number from ${lo} to ${hi} (it is \"${text(value)}\")`);\n    return fallback;\n  }\n  return n;\n};\nconst propertyName = (name, value, fallback) => {\n  const v = text(value) === '' ? fallback : text(value);\n  if (v && !/^[a-z0-9_]{1,100}$/.test(v)) {\n    problems.push(`${name} \"${v}\" is not a HubSpot internal property name (lower case letters, digits and _)`);\n    return '';\n  }\n  return v;\n};\n// A mapping table: {\"raw value\": \"allowed value\"}. Keys are compared after lower casing and turning anything that is\n// not a letter or digit into a space, so \"Google-Ads\", \"google ads\" and \" GOOGLE ADS \" are the same key.\nconst mapTable = (name, raw, needed) => {\n  if (!text(raw)) {\n    if (needed) problems.push(`${name} is empty, but its property is set. Add the mapping table or clear the property setting`);\n    return {};\n  }\n  let obj;\n  try { obj = JSON.parse(raw); } catch (e) { obj = null; }\n  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {\n    problems.push(`${name} is not a JSON object like {\"google ads\": \"Paid Search\"}`);\n    return {};\n  }\n  const out = {};\n  for (const [k, v] of Object.entries(obj)) {\n    if (typeof v !== 'string' || !v.trim() || !normKey(k)) {\n      problems.push(`${name}: \"${k}\" needs a non empty text value`);\n      continue;\n    }\n    out[normKey(k)] = v.trim();\n  }\n  return out;\n};\nconst validTz = tz => { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch (e) { return false; } };\nconst httpUrl = v => /^https?:\\/\\/[^\\s]+$/i.test(v);\n\nconst runNow = $('Run Now').isExecuted;\nconst body = runNow ? ($('Run Now').first().json.body || {}) : {};\nconst askedDry = body.dryRun === true || String(body.dryRun).toLowerCase() === 'true';\n// DRY_RUN is on unless it is exactly \"false\". The Run Now body can ask for a dry run, but never turn it off.\nconst dryRunSetting = text($env.DRY_RUN).toLowerCase() !== 'false';\n\nconst leadSourceProperty = propertyName('LEAD_SOURCE_PROPERTY', $env.LEAD_SOURCE_PROPERTY, 'lead_source');\nconst lifecycleTextProperty = propertyName('LIFECYCLE_TEXT_PROPERTY', $env.LIFECYCLE_TEXT_PROPERTY, '');\nconst freeDomains = text($env.FREE_EMAIL_DOMAINS)\n  ? list($env.FREE_EMAIL_DOMAINS).map(d => d.toLowerCase())\n  : ['gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'icloud.com',\n     'me.com', 'mac.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'mail.com', 'zoho.com', 'yandex.com'];\nconst s = {\n  trigger: runNow ? 'Run Now' : 'nightly run',\n  dryRun: dryRunSetting || askedDry,\n  dryRunSetting,\n  hubspotApp: (text($env.HUBSPOT_APP_URL) || 'https://app.hubspot.com').replace(/\\/+$/, ''),\n  portalId: text($env.HUBSPOT_PORTAL_ID),\n  pageSize: whole('HUBSPOT_PAGE_SIZE', $env.HUBSPOT_PAGE_SIZE, 100, 1, 100),\n  maxPages: whole('MAX_CONTACT_PAGES', $env.MAX_CONTACT_PAGES, 200, 1, 1000),\n  maxMerges: whole('MAX_MERGES_PER_RUN', $env.MAX_MERGES_PER_RUN, 10, 0, 50),\n  maxAssignments: whole('MAX_ASSIGNMENTS_PER_RUN', $env.MAX_ASSIGNMENTS_PER_RUN, 100, 0, 1000),\n  maxApprovals: whole('MAX_APPROVALS_PER_RUN', $env.MAX_APPROVALS_PER_RUN, 20, 1, 40),\n  approvalHours: whole('APPROVAL_LINK_HOURS', $env.APPROVAL_LINK_HOURS, 72, 1, 336),\n  backoffSeconds: decimal('BACKOFF_SECONDS', $env.BACKOFF_SECONDS, 2, 0.5, 30),\n  countryCode: text($env.DEFAULT_COUNTRY_CODE) || '1',\n  timezone: text($env.REPORT_TIMEZONE) || 'UTC',\n  approvalUrl: text($env.APPROVAL_WEBHOOK_URL),\n  dotPlusDomains: (text($env.EMAIL_DOT_PLUS_DOMAINS) ? list($env.EMAIL_DOT_PLUS_DOMAINS) : ['gmail.com', 'googlemail.com']).map(d => d.toLowerCase()),\n  freeDomains,\n  poolEntries: list($env.ROUND_ROBIN_OWNERS),\n  awayEntries: list($env.AWAY_OWNERS).map(x => x.toLowerCase()),\n  leadSourceProperty,\n  lifecycleTextProperty,\n  leadSourceMap: mapTable('LEAD_SOURCE_MAP', $env.LEAD_SOURCE_MAP, Boolean(leadSourceProperty)),\n  lifecycleMap: mapTable('LIFECYCLE_MAP', $env.LIFECYCLE_MAP, Boolean(lifecycleTextProperty)),\n};\nif (!text($env.HUBSPOT_TOKEN)) problems.push('HUBSPOT_TOKEN is empty');\nif (!httpUrl(text($env.SLACK_WEBHOOK_URL))) problems.push('SLACK_WEBHOOK_URL is empty or not a URL, so the report and the approval requests could not be sent');\nif (text($env.APPROVAL_SECRET).length < 32) problems.push('APPROVAL_SECRET must be at least 32 characters, so approval links cannot be forged');\nif (!httpUrl(s.approvalUrl)) problems.push('APPROVAL_WEBHOOK_URL must be the full https URL of the approval webhook');\nif (!/^\\d{1,3}$/.test(s.countryCode)) problems.push(`DEFAULT_COUNTRY_CODE must be 1 to 3 digits (it is \"${s.countryCode}\")`);\nif (!validTz(s.timezone)) problems.push(`REPORT_TIMEZONE \"${s.timezone}\" is not a valid time zone`);\nif (s.portalId && !/^\\d+$/.test(s.portalId)) problems.push(`HUBSPOT_PORTAL_ID must be digits (it is \"${s.portalId}\")`);\n\n// The properties every contact read asks for.\ns.contactProperties = [...new Set(['email', 'firstname', 'lastname', 'phone', 'mobilephone', 'company', 'lifecyclestage',\n  'hubspot_owner_id', 'createdate', 'hs_merged_object_ids', leadSourceProperty, lifecycleTextProperty].filter(Boolean))];\n// Property definitions the field cleanup checks the mapping tables against.\ns.propertyNames = [...new Set(['lifecyclestage', leadSourceProperty, lifecycleTextProperty].filter(Boolean))];\ns.problems = problems;\ns.route = problems.length ? (runNow ? 'refuse' : 'fail') : (runNow ? 'start' : 'scheduled');\ns.startedAt = new Date().toISOString();\nreturn [{ json: s }];\n"
+      }
+    },
+    {
+      "id": "d599c1ad-50de-538a-b43d-fc8f030a105c",
+      "name": "Route Run",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "907f7a1f-f9db-5379-a310-69f53c04cf95",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "start",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "start"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "2c0ae321-038b-5635-bfee-6b3a0111cd60",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "scheduled",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "scheduled"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "ca59e799-6a3d-54e9-ad4f-e32f2bd23b30",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "refuse",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "refuse"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "260605f1-13f7-56a6-a908-8fc56f9faf7d",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "fail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "fail"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      }
+    },
+    {
+      "id": "c427b0fd-7c4d-5cea-8f70-41a8d7a267f1",
+      "name": "Respond: Run Started",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        -140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ started: true, dryRun: $('Run Settings').first().json.dryRun }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "25ecf88c-6802-52ba-aef2-15f175cf5a23",
+      "name": "Respond: Bad Settings",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ started: false, error: 'settings', problems: $('Run Settings').first().json.problems }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "bf69b959-1e9d-5d8c-985d-e4e072716406",
+      "name": "Stop: Bad Settings",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        420
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'Cleanup settings are not valid, so nothing was read or changed. ' + $('Run Settings').first().json.problems.join('. ') + '.' }}"
+      }
+    },
+    {
+      "id": "5122e425-29e0-5d58-9b7e-6e31aaaacffa",
+      "name": "Note: Read",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        -400
+      ],
+      "parameters": {
+        "content": "## 2. Read HubSpot\nOwners, the property definitions the mapping tables are checked against, and every contact, 100 per page with the `after` cursor. Reads are tried 4 times, 5 seconds apart (a 429 waits out HubSpot's 10 second window). If a read still fails, nothing has been changed yet: the run stops with the reason.",
+        "width": 760,
+        "height": 1080,
+        "color": 7
+      }
+    },
+    {
+      "id": "751721c0-0a24-5a48-904a-1588c87e0ca9",
+      "name": "HubSpot: Get Owners",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hubapi.com/crm/v3/owners",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging.next.after }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 20,
+              "requestInterval": 150
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "={{ $('Run Settings').first().json.pageSize }}"
+            },
+            {
+              "name": "archived",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "f59dc63d-4ab8-50bd-b32b-d1917a693312",
+      "name": "HubSpot: Read Properties",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/properties/contacts/batch/read",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ archived: false, dataSensitivity: 'non_sensitive', inputs: $('Run Settings').first().json.propertyNames.map(name => ({ name })) }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "f6cac23b-53bd-530b-8c4e-45351d4f2717",
+      "name": "HubSpot: List Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1780,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging.next.after }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": "={{ $('Run Settings').first().json.maxPages }}",
+              "requestInterval": 150
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "={{ $('Run Settings').first().json.pageSize }}"
+            },
+            {
+              "name": "archived",
+              "value": "false"
+            },
+            {
+              "name": "properties",
+              "value": "={{ $('Run Settings').first().json.contactProperties.join(',') }}"
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "93170623-223c-5e28-80e7-7c02105088c7",
+      "name": "Stop: HubSpot Read Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        260
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'HubSpot did not answer \"' + $prevNode.name + '\", so nothing was changed: ' + ($json.error && $json.error.message ? $json.error.message : 'unknown error') + '. Check HUBSPOT_TOKEN (a private app token with the scopes in the setup guide) and HubSpot\\'s status page.' }}"
+      }
+    },
+    {
+      "id": "e0d8ecea-080e-55e1-be35-582f08a661ec",
+      "name": "Note: Plan",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2080,
+        -400
+      ],
+      "parameters": {
+        "content": "## 3. Find duplicates and plan\nExact matches: the same email (lower case, trimmed, Gmail dots and +tags ignored for EMAIL_DOT_PLUS_DOMAINS) or the same phone (digits only, with the country code) when the names agree and no two emails differ. Close matches: the same name plus the same company or email domain, or one phone with different emails or names. The record created first is kept. Exact matches merge automatically (up to MAX_MERGES_PER_RUN, never in a dry run); close matches only after a person approves. Right before merging, each record is read again and anything merged or deleted since is skipped.",
+        "width": 1100,
+        "height": 1080,
+        "color": 7
+      }
+    },
+    {
+      "id": "04467dbe-6687-5d7b-9207-c4531c3b7763",
+      "name": "Plan Cleanup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Finds duplicates in the contacts just read, picks the record to keep, plans the merges (up to MAX_MERGES_PER_RUN)\n// and the close matches that need a person, checks the owner list and the field mapping tables against HubSpot.\n// Nothing is written here; the workflow's memory (approvals, rotation) is only read.\nconst s = $('Run Settings').first().json;\nconst problems = [], warnings = [];\nconst now = Date.now();\n\nconst normKey = v => String(v ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\nconst display = p => [p.firstname, p.lastname].map(x => String(x || '').trim()).filter(Boolean).join(' ');\n\n// ---------------------------------------------------------------- what HubSpot returned\nconst owners = $('HubSpot: Get Owners').all().flatMap(i => i.json.results || []);\nconst propResponse = $('HubSpot: Read Properties').first().json;\nconst propDefs = Object.fromEntries((propResponse.results || []).map(p => [p.name, p]));\nconst pages = $('HubSpot: List Contacts').all().map(i => i.json);\nconst seen = new Set();\nconst contacts = [];\nfor (const page of pages) {\n  for (const r of page.results || []) {\n    const id = String(r.id);\n    if (!seen.has(id) && r.archived !== true) { seen.add(id); contacts.push(r); }\n  }\n}\nconst lastPage = pages[pages.length - 1] || {};\nif (lastPage.paging && lastPage.paging.next && lastPage.paging.next.after) {\n  warnings.push(`Only the first ${contacts.length} contacts were read (MAX_CONTACT_PAGES is ${s.maxPages}). Raise it to check the rest.`);\n}\n\n// ---------------------------------------------------------------- owners and the round robin pool\nconst activeOwners = owners.filter(o => o.archived !== true);\nconst ownerName = o => [o.firstName, o.lastName].filter(Boolean).join(' ') || o.email || `owner ${o.id}`;\nconst ownerNames = Object.fromEntries(owners.map(o => [String(o.id), ownerName(o)]));\nconst byId = new Map(activeOwners.map(o => [String(o.id), o]));\nconst byEmail = new Map(activeOwners.filter(o => o.email).map(o => [String(o.email).toLowerCase(), o]));\nconst away = new Set(s.awayEntries);\nconst pool = [];\nfor (const entry of s.poolEntries) {\n  const o = byId.get(entry) || byEmail.get(entry.toLowerCase());\n  if (!o) { problems.push(`ROUND_ROBIN_OWNERS: \"${entry}\" is not an active HubSpot owner, so it was left out of the rotation`); continue; }\n  if (o.type && o.type !== 'PERSON') { problems.push(`ROUND_ROBIN_OWNERS: \"${entry}\" is a ${String(o.type).toLowerCase()}, not a person, so it was left out of the rotation`); continue; }\n  const id = String(o.id);\n  if (pool.some(p => p.id === id)) continue;\n  pool.push({ id, name: ownerName(o), email: o.email || '', away: away.has(id) || away.has(String(o.email || '').toLowerCase()) });\n}\nfor (const a of s.awayEntries) {\n  if (!pool.some(p => p.id === a || p.email.toLowerCase() === a)) warnings.push(`AWAY_OWNERS: \"${a}\" is not in the rotation, so it changes nothing`);\n}\nconst routingOn = s.poolEntries.length > 0 && s.maxAssignments > 0;\nif (routingOn && !pool.some(p => !p.away)) problems.push('Nobody in ROUND_ROBIN_OWNERS is available (all are away or not valid owners), so unowned contacts stay unowned');\n\n// ---------------------------------------------------------------- field rules, checked against the property definitions\nconst fieldRules = {};\nconst stage = propDefs.lifecyclestage;\nif (!stage) problems.push('HubSpot did not return the lifecyclestage property definition');\nconst stageOptions = stage ? (stage.options || []).filter(o => o.hidden !== true) : [];\nconst stageOrder = Object.fromEntries(stageOptions.map((o, i) => [o.value, Number.isFinite(o.displayOrder) && o.displayOrder >= 0 ? o.displayOrder : 1000 + i]));\nconst stageLabels = Object.fromEntries(stageOptions.map(o => [o.value, o.label]));\nif (s.lifecycleTextProperty) {\n  const def = propDefs[s.lifecycleTextProperty];\n  if (!def) {\n    problems.push(`LIFECYCLE_TEXT_PROPERTY \"${s.lifecycleTextProperty}\" does not exist on contacts, so lifecycle stages were not cleaned`);\n  } else if (stage) {\n    const map = {};\n    for (const [k, v] of Object.entries(s.lifecycleMap)) {\n      if (stageOrder[v] === undefined) problems.push(`LIFECYCLE_MAP: \"${v}\" is not a lifecycle stage in this HubSpot account (use the internal value, for example marketingqualifiedlead), so \"${k}\" was ignored`);\n      else map[k] = v;\n    }\n    const byKey = {};\n    for (const o of stageOptions) { byKey[normKey(o.value)] = o.value; byKey[normKey(o.label)] = o.value; }\n    fieldRules.lifecycle = { textProperty: s.lifecycleTextProperty, map, byKey, order: stageOrder, labels: stageLabels };\n  }\n}\nif (s.leadSourceProperty) {\n  const def = propDefs[s.leadSourceProperty];\n  if (!def) {\n    problems.push(`LEAD_SOURCE_PROPERTY \"${s.leadSourceProperty}\" does not exist on contacts, so lead sources were not cleaned`);\n  } else if (def.modificationMetadata && def.modificationMetadata.readOnlyValue === true) {\n    problems.push(`LEAD_SOURCE_PROPERTY \"${s.leadSourceProperty}\" is read only in HubSpot (HubSpot calculates it), so lead sources were not cleaned. Use your own text or dropdown property`);\n  } else {\n    const isEnum = def.type === 'enumeration';\n    const options = isEnum ? (def.options || []).filter(o => o.hidden !== true).map(o => o.value) : [];\n    const map = {};\n    for (const [k, v] of Object.entries(s.leadSourceMap)) {\n      if (isEnum && !options.includes(v)) problems.push(`LEAD_SOURCE_MAP: \"${v}\" is not an option of ${s.leadSourceProperty}, so \"${k}\" was ignored`);\n      else map[k] = v;\n    }\n    const allowed = isEnum ? options : [...new Set(Object.values(map))];\n    const byKey = {};\n    for (const v of allowed) byKey[normKey(v)] = v;\n    if (isEnum) for (const o of def.options || []) if (o.hidden !== true) byKey[normKey(o.label)] = o.value;\n    fieldRules.leadSource = { property: s.leadSourceProperty, type: def.type, allowed, map, byKey };\n  }\n}\n\n// ---------------------------------------------------------------- normalizing for matching\nconst dotPlus = new Set(s.dotPlusDomains);\nconst free = new Set(s.freeDomains);\nfunction normEmail(raw) {\n  const e = String(raw || '').trim().toLowerCase();\n  const m = /^([^@\\s]+)@([^@\\s]+\\.[^@\\s]+)$/.exec(e);\n  if (!m) return null;\n  let [, local, domain] = m;\n  if (domain === 'googlemail.com') domain = 'gmail.com';\n  // Gmail ignores dots and anything after a + in the part before the @. Only for the domains listed in EMAIL_DOT_PLUS_DOMAINS.\n  if (dotPlus.has(domain) || (domain === 'gmail.com' && dotPlus.has('googlemail.com'))) local = local.split('+')[0].replace(/\\./g, '');\n  return local ? `${local}@${domain}` : null;\n}\nfunction normPhone(raw) {\n  let t = String(raw || '').trim();\n  if (!t) return null;\n  t = t.split(/\\s*(?:ext\\.?|extension|x|#)\\s*\\d+\\s*$/i)[0];\n  const plus = t.startsWith('+');\n  let digits = t.replace(/\\D/g, '');\n  if (!plus) {\n    if (digits.startsWith('00')) digits = digits.slice(2);\n    else if (s.countryCode === '1' && digits.length === 11 && digits.startsWith('1')) { /* already has the country code */ }\n    else if (s.countryCode === '1' && digits.length === 10) digits = '1' + digits;\n    else if (s.countryCode !== '1') digits = s.countryCode + digits.replace(/^0/, '');\n  }\n  // Too short, or a placeholder such as 000-000-0000\n  if (digits.length < 8 || digits.length > 15 || /^(\\d)\\1+$/.test(digits.slice(-7))) return null;\n  return '+' + digits;\n}\nconst normName = (first, last) => {\n  const f = normKey(first), l = normKey(last);\n  return f && l ? `${f} ${l}` : null;\n};\n// \"Northwind Traders Inc.\" and \"Northwind Traders\" are one company, and so are \"Smith & Sons\" and \"Smith and Sons\".\nconst SUFFIX = /\\b(and|inc|incorporated|llc|l l c|ltd|limited|co|corp|corporation|company|gmbh|plc|pty|sa|srl|bv)\\b/g;\nconst normCompany = raw => {\n  const k = normKey(String(raw || '').replace(/&/g, ' and ')).replace(SUFFIX, ' ').replace(/\\s+/g, ' ').trim();\n  return k || null;\n};\n\nconst C = new Map();\nfor (const r of contacts) {\n  const p = r.properties || {};\n  const email = normEmail(p.email);\n  const domain = email ? email.split('@')[1] : null;\n  C.set(String(r.id), {\n    id: String(r.id), p,\n    created: Date.parse(p.createdate || r.createdAt || '') || 0,\n    email, domain: domain && !free.has(domain) ? domain : null,\n    phones: [...new Set([normPhone(p.phone), normPhone(p.mobilephone)].filter(Boolean))],\n    name: normName(p.firstname, p.lastname),\n    first: normKey(p.firstname), last: normKey(p.lastname),\n    company: normCompany(p.company),\n    history: String(p.hs_merged_object_ids || '').split(';').map(x => x.trim()).filter(Boolean),\n    label: display(p) || String(p.email || '').trim() || `record ${r.id}`,\n  });\n}\n// The record to keep: the one created first (it carries the original source and the longest history).\n// Ties go to the lower record ID.\nconst older = (a, b) => (a.created - b.created) || (Number(a.id) - Number(b.id)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);\n\n// ---------------------------------------------------------------- exact matches (union find)\nconst parent = new Map([...C.keys()].map(id => [id, id]));\nconst emailsOf = new Map([...C.values()].map(c => [c.id, new Set(c.email ? [c.email] : [])]));\nconst reasonsOf = new Map([...C.keys()].map(id => [id, new Set()]));\nconst namesOf = new Map([...C.values()].map(c => [c.id, c.first || c.last ? [{ f: c.first, l: c.last }] : []]));\nconst find = id => { while (parent.get(id) !== id) { parent.set(id, parent.get(parent.get(id))); id = parent.get(id); } return id; };\nconst union = (a, b, reason) => {\n  const ra = find(a), rb = find(b);\n  if (ra === rb) { reasonsOf.get(ra).add(reason); return true; }\n  parent.set(rb, ra);\n  for (const e of emailsOf.get(rb)) emailsOf.get(ra).add(e);\n  for (const n of namesOf.get(rb)) namesOf.get(ra).push(n);\n  for (const r of reasonsOf.get(rb)) reasonsOf.get(ra).add(r);\n  reasonsOf.get(ra).add(reason);\n  return true;\n};\nconst sorted = [...C.values()].sort(older);\nconst byEmailKey = new Map();\nfor (const c of sorted) if (c.email) { if (!byEmailKey.has(c.email)) byEmailKey.set(c.email, []); byEmailKey.get(c.email).push(c.id); }\nfor (const ids of byEmailKey.values()) for (const id of ids.slice(1)) union(ids[0], id, 'same email');\n// A shared phone is only an exact match when the records do not hold two different emails AND their names agree: the\n// same last name, and first names that match or where one starts the other (\"Marc\" and \"Marcus\", \"O.\" and \"Owen\").\n// An office line is shared by several people, and a record without an email says nothing about who it is, so\n// anything else on one phone goes to a person instead of being merged.\nconst firstOk = (a, b) => !a || !b || a.startsWith(b) || b.startsWith(a);\nconst nameClash = (xs, ys) => {\n  if (!xs.length || !ys.length) return 'same phone, no name to compare';\n  for (const x of xs) for (const y of ys) {\n    if (!x.l || !y.l) return 'same phone, a last name is missing';\n    if (x.l !== y.l || !firstOk(x.f, y.f)) return 'same phone, different names';\n  }\n  return '';\n};\nconst phoneConflicts = [];\nconst byPhoneKey = new Map();\nfor (const c of sorted) for (const ph of c.phones) { if (!byPhoneKey.has(ph)) byPhoneKey.set(ph, []); byPhoneKey.get(ph).push(c.id); }\nfor (const ids of byPhoneKey.values()) {\n  for (const id of ids.slice(1)) {\n    const ra = find(ids[0]), rb = find(id);\n    if (ra === rb) { reasonsOf.get(ra).add('same phone'); continue; }\n    const together = new Set([...emailsOf.get(ra), ...emailsOf.get(rb)]);\n    const clash = together.size > 1 ? 'same phone, different emails' : nameClash(namesOf.get(ra), namesOf.get(rb));\n    if (clash) phoneConflicts.push([ids[0], id, clash]);\n    else union(ids[0], id, 'same phone');\n  }\n}\nconst components = new Map();\nfor (const id of C.keys()) { const r = find(id); if (!components.has(r)) components.set(r, []); components.get(r).push(C.get(id)); }\nconst entities = new Map();   // root -> entity\nfor (const [root, members] of components) {\n  members.sort(older);\n  entities.set(root, {\n    root, members, keep: members[0],\n    names: new Set(members.map(m => m.name).filter(Boolean)),\n    companies: new Set(members.map(m => m.company).filter(Boolean)),\n    domains: new Set(members.map(m => m.domain).filter(Boolean)),\n    ids: [...new Set(members.flatMap(m => [m.id, ...m.history]))],\n    reasons: [...reasonsOf.get(root)].sort(),\n  });\n}\nconst entityOf = id => entities.get(find(id));\nconst exactGroups = [...entities.values()].filter(e => e.members.length > 1).sort((a, b) => older(a.keep, b.keep));\n\n// ---------------------------------------------------------------- the merge plan, capped\nconst allMerges = [];\nfor (const g of exactGroups) {\n  for (const m of g.members.slice(1)) {\n    allMerges.push({\n      groupId: g.keep.id, primaryId: g.keep.id, secondaryId: m.id, reason: g.reasons.join(' and '),\n      primaryName: g.keep.label, secondaryName: m.label,\n    });\n  }\n}\nconst merges = allMerges.slice(0, s.maxMerges).map((m, i) => Object.assign(m, { seq: i + 1 }));\nconst deferredMerges = allMerges.length - merges.length;\n\n// ---------------------------------------------------------------- close matches for a person\nconst pairs = new Map();\nconst addPair = (e1, e2, reason) => {\n  if (!e1 || !e2 || e1 === e2) return;\n  const [a, b] = older(e1.keep, e2.keep) <= 0 ? [e1, e2] : [e2, e1];\n  const key = `${a.keep.id}|${b.keep.id}`;\n  if (!pairs.has(key)) pairs.set(key, { a, b, reasons: new Set() });\n  pairs.get(key).reasons.add(reason);\n};\nconst byName = new Map();\nfor (const e of entities.values()) for (const n of e.names) { if (!byName.has(n)) byName.set(n, []); byName.get(n).push(e); }\nfor (const list of byName.values()) {\n  for (let i = 0; i < list.length; i++) {\n    for (let j = i + 1; j < list.length; j++) {\n      const [e1, e2] = [list[i], list[j]];\n      if ([...e1.companies].some(c => e2.companies.has(c))) addPair(e1, e2, 'same name and company');\n      if ([...e1.domains].some(d => e2.domains.has(d))) addPair(e1, e2, 'same name and email domain');\n    }\n  }\n}\nfor (const [x, y, why] of phoneConflicts) addPair(entityOf(x), entityOf(y), why);\n\nconst st = $getWorkflowStaticData('global');\nconst approvals = st.approvals || {};\nconst memoryFor = (a, b) => {\n  // Records keep their old IDs in hs_merged_object_ids, so a decision survives a later merge of either record.\n  let found = null;\n  for (const x of a.ids) for (const y of b.ids) {\n    const entry = approvals[[x, y].sort().join('|')];\n    if (entry && (!found || entry.status === 'skipped')) found = entry;\n  }\n  return found;\n};\nconst card = c => ({\n  id: c.id, name: c.label, email: String(c.p.email || ''), phone: String(c.p.phone || c.p.mobilephone || ''),\n  company: String(c.p.company || ''), created: c.p.createdate || '',\n});\nconst newPairs = [], waitingPairs = [], skippedPairs = [], postponedPairs = [];\nfor (const pr of [...pairs.values()].sort((x, y) => older(x.a.keep, y.a.keep) || older(x.b.keep, y.b.keep))) {\n  const reason = [...pr.reasons].sort().join('; ');\n  const memo = memoryFor(pr.a, pr.b);\n  const item = { pairKey: [pr.a.keep.id, pr.b.keep.id].sort().join('|'), primaryId: pr.a.keep.id, secondaryId: pr.b.keep.id, reason,\n    primary: card(pr.a.keep), secondary: card(pr.b.keep) };\n  if (memo && memo.status === 'skipped') { skippedPairs.push(item); continue; }\n  if (memo && memo.status === 'waiting' && Date.parse(memo.expiresAt) > now) { waitingPairs.push(item); continue; }\n  // A side that still has exact duplicates to merge gets a new record ID when they merge, so ask after that. With\n  // automatic merging off (MAX_MERGES_PER_RUN is 0) that merge never comes, so ask now.\n  if (s.maxMerges > 0 && (pr.a.members.length > 1 || pr.b.members.length > 1)) { postponedPairs.push(item); continue; }\n  newPairs.push(item);\n}\nconst askNow = newPairs.slice(0, s.maxApprovals);\nconst morePairs = newPairs.length - askNow.length;\n\n// Sets of records that are (or may be) one person. Owners are assigned per set, so two reps never chase one person.\nconst dupSets = [\n  ...exactGroups.map(g => g.members.map(m => m.id)),\n  ...[...pairs.values()].filter(pr => !skippedPairs.some(sp => sp.pairKey === [pr.a.keep.id, pr.b.keep.id].sort().join('|')))\n    .map(pr => [...pr.a.members, ...pr.b.members].map(m => m.id)),\n];\n\nreturn [{ json: {\n  dryRun: s.dryRun,\n  counts: { contacts: contacts.length, exactGroups: exactGroups.length, exactRecords: allMerges.length, closePairs: pairs.size },\n  merges, deferredMerges, allMergeCount: allMerges.length,\n  exactGroups: exactGroups.map(g => ({ keepId: g.keep.id, keepName: g.keep.label, ids: g.members.map(m => m.id), reason: g.reasons.join(' and ') })),\n  newPairs: askNow, morePairs, waitingCount: waitingPairs.length, skippedCount: skippedPairs.length, postponedCount: postponedPairs.length,\n  dupSets, ownerPool: pool, ownerNames, routingOn, fieldRules, stageOrder,\n  lastOwnerId: (st.rotation && st.rotation.lastOwnerId) || null,\n  problems, warnings,\n} }];\n"
+      }
+    },
+    {
+      "id": "e9cd6963-aa08-5b67-8b43-7ef78dd021e9",
+      "name": "Any Merges?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2360,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ffce9fe2-f123-5eb1-8ec3-3bdd218a85db",
+              "leftValue": "={{ $('Plan Cleanup').first().json.dryRun === false && $('Plan Cleanup').first().json.merges.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "95f0e22f-f01e-5494-ba0f-921bcf29297f",
+      "name": "HubSpot: Check Merge Records",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        -140
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/read",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: ['email', 'firstname', 'lastname', 'hs_merged_object_ids'], propertiesWithHistory: [], inputs: [...new Set($('Plan Cleanup').first().json.merges.flatMap(m => [m.primaryId, m.secondaryId]))].map(id => ({ id })) }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "8aa304e7-0c8d-596d-be55-b13b47883023",
+      "name": "Prepare Merges",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "// Checks every planned merge against a fresh read, right before merging. A record that was merged or deleted in\n// HubSpot since the contact list was read is skipped and reported, never merged blindly.\n// HubSpot gives a merged record a new ID and keeps the old IDs in hs_merged_object_ids. Its docs do not say whether a\n// read by an old ID returns the record it now belongs to or nothing, so both are handled: a record under another ID,\n// or one that lists the old ID, was merged; no record at all means merged or deleted, and is never merged blindly.\nconst plan = $('Plan Cleanup').first().json;\nconst read = $input.first().json;\nconst results = read.results || [];\nconst history = r => String((r.properties || {}).hs_merged_object_ids || '').split(';').map(x => x.trim()).filter(Boolean);\nconst resolve = id => results.find(r => String(r.id) === id) || results.find(r => history(r).includes(id)) || null;\n\nconst merges = [], skipped = [];\nconst blockedGroups = new Map();\nfor (const m of plan.merges) {\n  if (blockedGroups.has(m.groupId)) { skipped.push({ ...m, why: blockedGroups.get(m.groupId) }); continue; }\n  const keep = resolve(m.primaryId), other = resolve(m.secondaryId);\n  let why = '';\n  if (keep && other && String(keep.id) === String(other.id)) why = 'already merged in HubSpot by someone else';\n  else if (!keep || String(keep.id) !== m.primaryId) {\n    why = keep ? `the record to keep was merged into record ${keep.id} in HubSpot since the read` : 'the record to keep is no longer in HubSpot under this ID (merged or deleted since the read)';\n    blockedGroups.set(m.groupId, why);\n  } else if (!other) why = 'no longer in HubSpot under this ID (merged or deleted since the read)';\n  else if (String(other.id) !== m.secondaryId) why = `already merged into record ${other.id} in HubSpot by someone else`;\n  if (why) skipped.push({ ...m, why });\n  else merges.push(m);\n}\nif (!merges.length) return [{ json: { none: true, skipped } }];\nreturn merges.map(m => ({ json: { ...m, skipped } }));\n"
+      }
+    },
+    {
+      "id": "f2111540-c88e-57f6-93bb-84e52380ebb1",
+      "name": "Anything To Merge?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3020,
+        -140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "10512502-57c0-5272-aad2-fbe971e91ae1",
+              "leftValue": "={{ $json.none === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8e1e42d1-e277-5e34-8360-5ca024016d30",
+      "name": "Note: Merge",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3220,
+        -400
+      ],
+      "parameters": {
+        "content": "## 4. Merge exact duplicates\nOne merge at a time with POST /crm/v3/objects/contacts/merge. HubSpot gives the merged record a new ID, so the next merge of the same group goes into that ID. 429, 423, 5xx and lost connections wait 2, 4, 8, then 16 seconds (BACKOFF_SECONDS doubles each time) and try again; a DAILY 429 is not retried. Every merge ends in Record Merge, so the report lists each one, also a group where a later merge failed. The merged records are then read again for the next step. That read also checks merges HubSpot answered with an error: if both IDs now lead to one record, the merge went through.",
+        "width": 1660,
+        "height": 1080,
+        "color": 7
+      }
+    },
+    {
+      "id": "6bfd4cfe-2119-5672-b6f0-8d043aad6ae6",
+      "name": "Loop: Merges",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        3260,
+        -140
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "89763ad2-e987-5edd-b076-7bd00646d300",
+      "name": "Next Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3480,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// One merge per pass. HubSpot gives the merged record a new ID, so the second merge of a group goes into the ID the\n// first merge returned.\nconst m = $input.first().json;\nconst prev = $('Record Merge').isExecuted ? $('Record Merge').first().json : null;\nconst primaryNow = prev && prev.groupId === m.groupId && prev.survivorId ? prev.survivorId : m.primaryId;\nreturn [{ json: {\n  seq: m.seq, groupId: m.groupId, primaryId: m.primaryId, secondaryId: m.secondaryId, reason: m.reason,\n  primaryName: m.primaryName, secondaryName: m.secondaryName, primaryNow,\n  writeKey: `merge-${m.seq}`, attempt: 1,\n  request: { primaryObjectId: primaryNow, objectIdToMerge: m.secondaryId },\n} }];\n"
+      }
+    },
+    {
+      "id": "ebb75fef-4a01-5e9b-8992-7c849a55f656",
+      "name": "HubSpot: Merge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3700,
+        120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/merge",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "f18c74b1-53c1-51ae-8cde-638fce0c1c20",
+      "name": "Check Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3920,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// Reads HubSpot's answer to a write and decides: done, or wait and try again.\n// Rate limits (429), a locked record (423), server errors (5xx) and lost connections are tried again up to 5 times,\n// waiting BACKOFF_SECONDS, then twice as long each time (2, 4, 8, 16 seconds by default), or longer when HubSpot sends\n// Retry-After. HubSpot's burst limit is counted per 10 seconds, so the waits add up to more than one window.\n// A 429 for the DAILY limit is not tried again: it only resets at midnight.\nconst s = $('Run Settings').first().json;\nconst spec = $('Next Merge').first().json;\nconst waited = $('Wait: Merge Backoff').isExecuted ? $('Wait: Merge Backoff').first().json : null;\nconst attempt = waited && waited.writeKey === spec.writeKey ? waited.attempt : 1;\nconst statuses = (waited && waited.writeKey === spec.writeKey ? waited.statuses : null) || [];\nconst MAX_TRIES = 5;\n\nconst r = $input.first().json;\nconst status = Number(r.statusCode) || 0;   // 0: no answer (timeout or lost connection)\nlet body = r.body;\nif (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) { /* keep the text */ } }\nconst headers = r.headers || {};\nconst message = status === 0\n  ? `no answer from HubSpot (${(r.error && (r.error.message || r.error.description)) || 'connection failed'})`\n  : `${status} ${typeof body === 'object' && body ? (body.message || body.category || '') : String(body || '').slice(0, 200)}`.trim();\nconst allStatuses = [...statuses, status];\n\nconst daily = status === 429 && body && typeof body === 'object' && String(body.policyName || '').toUpperCase() === 'DAILY';\nconst retryable = !daily && (status === 429 || status === 423 || status >= 500 || status === 0);\nif (retryable && attempt < MAX_TRIES) {\n  let wait = Math.min(s.backoffSeconds * Math.pow(2, attempt - 1), 60);\n  if (status === 423) wait = Math.max(wait, 2);   // HubSpot locks last 2 seconds\n  const retryAfter = Number(headers['retry-after']);\n  if (retryAfter > 0) wait = Math.max(wait, Math.min(retryAfter, 60));\n  return [{ json: { ...spec, retry: true, attempt: attempt + 1, wait, statuses: allStatuses, lastMessage: message } }];\n}\nreturn [{ json: {\n  ...spec, retry: false, attempts: attempt, statuses: allStatuses, status, response: typeof body === 'object' ? body : null,\n  message: daily ? `HubSpot's daily API limit is used up (429 DAILY), so it was not tried again: ${message}` : message,\n} }];\n"
+      }
+    },
+    {
+      "id": "e32b9cc1-93f5-59da-a159-6b9e033ca77c",
+      "name": "Retry Merge?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4140,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "b1559bdf-38a7-55af-a60c-b3df5f38e15b",
+              "leftValue": "={{ $json.retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "862382e1-6eab-5e24-bbc0-73e58deb2d39",
+      "name": "Wait: Merge Backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        4140,
+        340
+      ],
+      "parameters": {
+        "amount": "={{ $json.wait }}",
+        "unit": "seconds"
+      },
+      "webhookId": "e4c043e7-96d5-5d02-93a4-96311b6d7e7e"
+    },
+    {
+      "id": "3ff96884-9047-523b-9702-9e33dee7c8d9",
+      "name": "Record Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4360,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// The outcome of one merge. Every merge ends here exactly once, so the report can list each one, including a group\n// where the first merge worked and a later one did not.\nconst r = $input.first().json;\nconst ok = r.status >= 200 && r.status < 300 && r.response && r.response.id;\nconst gone = r.status === 404 || (r.response && r.response.category === 'OBJECT_NOT_FOUND');\nlet outcome = 'failed';\nif (ok) outcome = 'merged';\nelse if (gone) outcome = 'already_merged';\nreturn [{ json: {\n  seq: r.seq, groupId: r.groupId, primaryId: r.primaryId, primaryNow: r.primaryNow, secondaryId: r.secondaryId,\n  primaryName: r.primaryName, secondaryName: r.secondaryName, reason: r.reason,\n  outcome,\n  newId: ok ? String(r.response.id) : null,\n  survivorId: ok ? String(r.response.id) : r.primaryNow,\n  attempts: r.attempts, statuses: r.statuses, status: r.status,\n  message: ok ? '' : (gone ? `HubSpot no longer has one of the records (${r.message})` : r.message),\n} }];\n"
+      }
+    },
+    {
+      "id": "e2e2d6b3-8d2b-51c3-a3cf-ef4fc11886c5",
+      "name": "Reload Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4360,
+        -140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "842c33a2-409e-5460-8da9-c3e7d9e7d79c",
+              "leftValue": "={{ $('Loop: Merges').all(0).some(i => i.json.outcome === 'merged' || i.json.outcome === 'failed') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "e262f582-bed5-51ae-a809-f11bd2e72aad",
+      "name": "HubSpot: Reload Survivors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4580,
+        -140
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/read",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Run Settings').first().json.contactProperties, propertiesWithHistory: [], inputs: [...new Set($('Loop: Merges').all(0).flatMap(i => i.json.outcome === 'merged' ? [i.json.newId] : i.json.outcome === 'failed' ? [i.json.primaryNow, i.json.secondaryId] : []))].map(id => ({ id })) }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "8143de8c-93c1-55ee-856c-9ebc45625702",
+      "name": "Note: Update",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        800
+      ],
+      "parameters": {
+        "content": "## 5. Fix fields and assign owners\nLead source and lifecycle stage values are mapped to the allowed set with LEAD_SOURCE_MAP and LIFECYCLE_MAP. Lifecycle stage only moves forward, as HubSpot requires. Unowned contacts get the next available owner from ROUND_ROBIN_OWNERS (AWAY_OWNERS are skipped); the rotation is remembered between runs. Records of one person share one owner. Only changed properties are sent, 100 contacts per batch update, with the same backoff as merges. If HubSpot refuses a whole batch because of one contact, its contacts are sent again one at a time.",
+        "width": 1880,
+        "height": 1060,
+        "color": 7
+      }
+    },
+    {
+      "id": "b8ab1c21-ae4b-5ab6-a54b-dfd9294f6590",
+      "name": "Plan Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "// Plans the field fixes and the owner assignments on the contacts as they are after this run's merges.\n// Live: merged records come from a fresh read (their new IDs), which also settles merges HubSpot answered with an error.\n// Dry run: merges are predicted with HubSpot's documented\n// merge rules (the kept record's values win, empty fields are filled from the other record, the furthest lifecycle\n// stage is kept). Only properties whose value actually changes are sent, and contacts without a change are left out.\nconst s = $('Run Settings').first().json;\nconst plan = $('Plan Cleanup').first().json;\nconst rules = plan.fieldRules || {};\nconst stageOrder = plan.stageOrder || {};\nconst problems = [], warnings = [];\nconst normKey = v => String(v ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\nconst filled = v => v !== undefined && v !== null && String(v).trim() !== '';\nconst label = c => [c.p.firstname, c.p.lastname].map(x => String(x || '').trim()).filter(Boolean).join(' ') || String(c.p.email || '').trim() || `record ${c.id}`;\n\n// ---------------------------------------------------------------- the contacts as read\nconst cur = new Map();\nfor (const page of $('HubSpot: List Contacts').all()) {\n  for (const r of page.json.results || []) {\n    const id = String(r.id);\n    if (!cur.has(id) && r.archived !== true) cur.set(id, { id, p: { ...(r.properties || {}) }, created: Date.parse((r.properties || {}).createdate || r.createdAt || '') || 0 });\n  }\n}\n\n// ---------------------------------------------------------------- field cleanup rules\nfunction cleanLeadSource(value) {\n  const rule = rules.leadSource;\n  const v = String(value);\n  if (rule.allowed.includes(v)) return v;\n  const k = normKey(v);\n  return rule.map[k] || rule.byKey[k] || null;\n}\nfunction cleanStage(raw) {\n  const rule = rules.lifecycle;\n  const k = normKey(raw);\n  return rule.map[k] || rule.byKey[k] || null;\n}\nfunction fieldFixes(c) {\n  const out = { props: {}, changes: [], unmapped: [], backward: [] };\n  if (rules.leadSource) {\n    const prop = rules.leadSource.property, v = c.p[prop];\n    if (filled(v)) {\n      const t = cleanLeadSource(v);\n      if (t === null) out.unmapped.push({ field: 'lead source', value: String(v) });\n      else if (t !== v) { out.props[prop] = t; out.changes.push({ field: 'lead source', from: String(v), to: t }); }\n    }\n  }\n  if (rules.lifecycle) {\n    const raw = c.p[rules.lifecycle.textProperty];\n    if (filled(raw)) {\n      const t = cleanStage(raw);\n      const now = String(c.p.lifecyclestage || '');\n      if (t === null) out.unmapped.push({ field: 'lifecycle stage', value: String(raw) });\n      else if (now === t) { /* already right */ }\n      // HubSpot only moves lifecycle stage forward through the API. A stage further along is never moved back.\n      else if (now && (rules.lifecycle.order[now] ?? -1) > (rules.lifecycle.order[t] ?? -1)) out.backward.push({ from: now, to: t, raw: String(raw) });\n      else { out.props.lifecyclestage = t; out.changes.push({ field: 'lifecycle stage', from: now || '(empty)', to: t, raw: String(raw) }); }\n    }\n  }\n  return out;\n}\nconst messyCount = list => list.reduce((n, c) => { const f = fieldFixes(c); return n + f.changes.length + f.unmapped.length; }, 0);\nconst before = {\n  contacts: cur.size,\n  unowned: [...cur.values()].filter(c => !filled(c.p.hubspot_owner_id)).length,\n  messy: messyCount([...cur.values()]),\n};\n\n// ---------------------------------------------------------------- apply this run's merges to the picture\nfunction predictMerge(keep, other, newId) {\n  const p = { ...keep.p };\n  for (const [k, v] of Object.entries(other.p)) if (!filled(p[k]) && filled(v)) p[k] = v;\n  const a = keep.p.lifecyclestage, b = other.p.lifecyclestage;\n  if (filled(a) && filled(b)) p.lifecyclestage = (stageOrder[b] ?? -1) > (stageOrder[a] ?? -1) ? b : a;\n  return { id: newId, p, created: Math.min(keep.created || Infinity, other.created || Infinity) };\n}\nconst uncertain = new Set();   // records whose state is not known after this run: left for the next run\nconst rename = {};\nconst survivors = new Set();\nconst resolveId = id => { let x = id, n = 0; while (rename[x] && n++ < 100) x = rename[x]; return x; };\nconst applyMerge = (keepId, otherId, newId) => {\n  const k = resolveId(keepId), o = resolveId(otherId);\n  const keep = cur.get(k), other = k === o ? null : cur.get(o);\n  if (keep && other) { cur.delete(k); cur.delete(o); cur.set(newId, predictMerge(keep, other, newId)); }\n  else if (keep && k !== newId) { cur.delete(k); cur.set(newId, { ...keep, id: newId }); }\n  for (const x of new Set([keepId, otherId, k, o])) if (x !== newId) rename[x] = newId;\n  survivors.delete(k);\n  survivors.delete(o);\n  survivors.add(newId);\n};\nconst live = !s.dryRun;\nlet mergeResults = [];\nif (!live) {\n  for (const m of plan.merges) applyMerge(resolveId(m.primaryId), m.secondaryId, resolveId(m.primaryId));\n} else {\n  const prep = $('Prepare Merges').isExecuted ? $('Prepare Merges').first().json : null;\n  for (const k of (prep && prep.skipped) || []) { uncertain.add(k.primaryId); uncertain.add(k.secondaryId); }\n  mergeResults = $('Loop: Merges').isExecuted ? $('Loop: Merges').all(0).map(i => ({ ...i.json })) : [];\n  const reloaded = $('HubSpot: Reload Survivors').isExecuted;\n  let fresh = null;\n  if (reloaded) {\n    const j = $input.first().json;\n    if (j.error || !Array.isArray(j.results)) {\n      const why = j.error ? (j.error.message || j.error.description || 'unknown error') : 'unexpected answer';\n      problems.push(`The merged records could not be read again (${why}), so their fields and owners were left for the next run`);\n    } else fresh = j.results;\n  }\n  // A merge HubSpot answered with an error may still have happened: the answer can be lost after HubSpot saved the\n  // merge, and the retry is then refused because both IDs already belong to one record. The read after the merges\n  // settles it: when both IDs now lead to one record, the records are one and the merge counts as done.\n  const hist = r => String((r.properties || {}).hs_merged_object_ids || '').split(';').map(x => x.trim()).filter(Boolean);\n  const found = id => (fresh || []).find(r => String(r.id) === id) || (fresh || []).find(r => hist(r).includes(id)) || null;\n  for (const m of mergeResults) {\n    if (m.outcome !== 'failed' || !fresh) continue;\n    const a = found(String(m.primaryNow)), b = found(String(m.secondaryId));\n    if (a && b && String(a.id) === String(b.id)) Object.assign(m, { outcome: 'merged', newId: String(a.id), survivorId: String(a.id), confirmedByRead: true });\n  }\n  for (const m of mergeResults) {\n    if (m.outcome === 'merged') applyMerge(m.primaryNow, m.secondaryId, m.newId);\n    // A record HubSpot no longer had, or a failed merge that could not be checked: not known, left for the next run.\n    else if (m.outcome === 'already_merged' || (m.outcome === 'failed' && !fresh)) {\n      for (const x of [m.primaryNow, m.secondaryId]) { uncertain.add(x); uncertain.add(resolveId(x)); }\n    }\n  }\n  if (reloaded) {\n    if (!fresh) for (const id of survivors) uncertain.add(id);\n    else {\n      const got = new Set();\n      for (const r of fresh) {\n        const id = String(r.id);\n        if (cur.has(id)) { cur.get(id).p = { ...(r.properties || {}) }; got.add(id); }\n      }\n      for (const id of survivors) if (!got.has(id)) uncertain.add(id);\n    }\n  }\n}\n\n// ---------------------------------------------------------------- field fixes\nconst updates = new Map();\nconst fixes = [], unmapped = {}, backward = [];\nconst want = (id, props) => { if (!updates.has(id)) updates.set(id, {}); Object.assign(updates.get(id), props); };\nfor (const c of cur.values()) {\n  if (uncertain.has(c.id)) continue;\n  const f = fieldFixes(c);\n  if (f.changes.length) { fixes.push({ id: c.id, name: label(c), changes: f.changes }); want(c.id, f.props); }\n  for (const u of f.unmapped) { const k = `${u.field}\\u0000${u.value}`; unmapped[k] = (unmapped[k] || 0) + 1; }\n  for (const b of f.backward) backward.push({ id: c.id, name: label(c), ...b });\n}\n\n// ---------------------------------------------------------------- owners, round robin\nconst owned = c => filled(c.p.hubspot_owner_id);\n// Records that are (or may be) one person form one set: one owner for the whole set, and none at all when one of them\n// already has an owner (the merge keeps that owner).\nconst setParent = new Map();\nconst sFind = x => { while (setParent.get(x) !== x) x = setParent.get(x); return x; };\nfor (const set of plan.dupSets) {\n  const ids = [...new Set(set.map(resolveId))].filter(id => cur.has(id) && !uncertain.has(id));\n  if (ids.length < 2) continue;\n  for (const id of ids) if (!setParent.has(id)) setParent.set(id, id);\n  for (const id of ids.slice(1)) { const a = sFind(ids[0]), b = sFind(id); if (a !== b) setParent.set(b, a); }\n}\nconst sets = new Map();\nfor (const id of setParent.keys()) { const r = sFind(id); if (!sets.has(r)) sets.set(r, []); sets.get(r).push(id); }\nconst unassigned = { ownedDuplicate: 0, cap: 0, routingOff: 0, nobodyAvailable: 0 };\nconst slots = [];\nconst inSet = new Set();\nfor (const ids of sets.values()) {\n  ids.forEach(id => inSet.add(id));\n  const members = ids.map(id => cur.get(id));\n  const free = members.filter(c => !owned(c));\n  if (!free.length) continue;\n  if (members.some(owned)) { unassigned.ownedDuplicate += free.length; continue; }\n  slots.push({ ids: free.map(c => c.id).sort((a, b) => Number(a) - Number(b)), created: Math.min(...free.map(c => c.created)) });\n}\nfor (const c of cur.values()) {\n  if (uncertain.has(c.id) || inSet.has(c.id) || owned(c)) continue;\n  slots.push({ ids: [c.id], created: c.created });\n}\n// Oldest first, so a backlog is worked through in order across runs.\nslots.sort((a, b) => (a.created - b.created) || (Number(a.ids[0]) - Number(b.ids[0])));\nconst pool = plan.ownerPool || [];\nconst assignments = [];\nconst waitingCount = slots.reduce((n, sl) => n + sl.ids.length, 0);\nif (!plan.routingOn) unassigned.routingOff = waitingCount;\nelse if (!pool.some(o => !o.away)) unassigned.nobodyAvailable = waitingCount;\nelse {\n  // The rotation remembers the last owner who got a contact, by ID, so adding or removing people keeps the order fair.\n  let idx = pool.findIndex(o => o.id === plan.lastOwnerId);\n  let used = 0;\n  for (let n = 0; n < slots.length; n++) {\n    const slot = slots[n];\n    if (used + slot.ids.length > s.maxAssignments) { unassigned.cap = slots.slice(n).reduce((t, sl) => t + sl.ids.length, 0); break; }\n    do { idx = (idx + 1) % pool.length; } while (pool[idx].away);\n    assignments.push({ ids: slot.ids, names: slot.ids.map(id => label(cur.get(id))), ownerId: pool[idx].id, ownerName: pool[idx].name });\n    for (const id of slot.ids) want(id, { hubspot_owner_id: pool[idx].id });\n    used += slot.ids.length;\n  }\n}\n\n// ---------------------------------------------------------------- after, if every write works\nconst assignedIds = new Set(assignments.flatMap(a => a.ids));\nconst remaining = [...cur.values()];\nconst after = {\n  contacts: remaining.length,\n  unowned: remaining.filter(c => !owned(c) && !assignedIds.has(c.id)).length,\n  messy: Object.values(unmapped).reduce((a, b) => a + b, 0)\n    + remaining.filter(c => uncertain.has(c.id)).reduce((n, c) => { const f = fieldFixes(c); return n + f.changes.length + f.unmapped.length; }, 0),\n};\nconst meta = {\n  before, after, fixes, assignments, unassigned, backward,\n  unmapped: Object.entries(unmapped).map(([k, n]) => ({ field: k.split('\\u0000')[0], value: k.split('\\u0000')[1], count: n })).sort((a, b) => b.count - a.count),\n  uncertain: [...uncertain], problems, warnings,\n  merges: mergeResults,\n};\n\nconst inputs = [...updates.entries()].sort((a, b) => Number(a[0]) - Number(b[0]))\n  .map(([id, properties]) => ({ id, properties, objectWriteTraceId: `contact-${id}` }));\nif (!live || !inputs.length) return [{ json: { none: true, meta } }];\nconst out = [];\nfor (let i = 0; i < inputs.length; i += 100) {\n  const batchNo = out.length + 1;\n  out.push({ json: { batchNo, writeKey: `update-${batchNo}`, attempt: 1, request: { inputs: inputs.slice(i, i + 100) }, ...(batchNo === 1 ? { meta } : {}) } });\n}\nreturn out;\n"
+      }
+    },
+    {
+      "id": "c71f0c7e-563f-5d79-8456-91f2bfc577ac",
+      "name": "Any Updates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        1240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "10512502-57c0-5272-aad2-fbe971e91ae1",
+              "leftValue": "={{ $json.none === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "240d6a4b-4d6d-550e-b130-e516007c5a91",
+      "name": "Loop: Updates",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        440,
+        1240
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "9bdfe4c5-ac6b-5f72-9ef3-f7197622934a",
+      "name": "HubSpot: Batch Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        1480
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "e05f53ee-0eae-54a6-9c78-7ab92ffa690c",
+      "name": "Check Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1480
+      ],
+      "parameters": {
+        "jsCode": "// Reads HubSpot's answer to a write and decides: done, or wait and try again.\n// Rate limits (429), a locked record (423), server errors (5xx) and lost connections are tried again up to 5 times,\n// waiting BACKOFF_SECONDS, then twice as long each time (2, 4, 8, 16 seconds by default), or longer when HubSpot sends\n// Retry-After. HubSpot's burst limit is counted per 10 seconds, so the waits add up to more than one window.\n// A 429 for the DAILY limit is not tried again: it only resets at midnight.\nconst s = $('Run Settings').first().json;\nconst spec = $('Loop: Updates').first().json;\nconst waited = $('Wait: Update Backoff').isExecuted ? $('Wait: Update Backoff').first().json : null;\nconst attempt = waited && waited.writeKey === spec.writeKey ? waited.attempt : 1;\nconst statuses = (waited && waited.writeKey === spec.writeKey ? waited.statuses : null) || [];\nconst MAX_TRIES = 5;\n\nconst r = $input.first().json;\nconst status = Number(r.statusCode) || 0;   // 0: no answer (timeout or lost connection)\nlet body = r.body;\nif (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) { /* keep the text */ } }\nconst headers = r.headers || {};\nconst message = status === 0\n  ? `no answer from HubSpot (${(r.error && (r.error.message || r.error.description)) || 'connection failed'})`\n  : `${status} ${typeof body === 'object' && body ? (body.message || body.category || '') : String(body || '').slice(0, 200)}`.trim();\nconst allStatuses = [...statuses, status];\n\nconst daily = status === 429 && body && typeof body === 'object' && String(body.policyName || '').toUpperCase() === 'DAILY';\nconst retryable = !daily && (status === 429 || status === 423 || status >= 500 || status === 0);\nif (retryable && attempt < MAX_TRIES) {\n  let wait = Math.min(s.backoffSeconds * Math.pow(2, attempt - 1), 60);\n  if (status === 423) wait = Math.max(wait, 2);   // HubSpot locks last 2 seconds\n  const retryAfter = Number(headers['retry-after']);\n  if (retryAfter > 0) wait = Math.max(wait, Math.min(retryAfter, 60));\n  return [{ json: { ...spec, retry: true, attempt: attempt + 1, wait, statuses: allStatuses, lastMessage: message } }];\n}\nreturn [{ json: {\n  ...spec, retry: false, attempts: attempt, statuses: allStatuses, status, response: typeof body === 'object' ? body : null,\n  message: daily ? `HubSpot's daily API limit is used up (429 DAILY), so it was not tried again: ${message}` : message,\n} }];\n"
+      }
+    },
+    {
+      "id": "2961a903-fbc7-5fd1-bad8-516e4922c3c8",
+      "name": "Retry Update?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        1480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "b1559bdf-38a7-55af-a60c-b3df5f38e15b",
+              "leftValue": "={{ $json.retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "63f8d7b0-7648-5644-bca1-7e9a196a35e7",
+      "name": "Wait: Update Backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        1700
+      ],
+      "parameters": {
+        "amount": "={{ $json.wait }}",
+        "unit": "seconds"
+      },
+      "webhookId": "08fdad78-89e4-5c0b-9537-fff593b50cba"
+    },
+    {
+      "id": "e0ae92d2-c6f6-5bee-b738-6ea494c424f2",
+      "name": "Record Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        1480
+      ],
+      "parameters": {
+        "jsCode": "// The outcome of one batch update (up to 100 contacts). A 207 answer lists the contacts HubSpot refused; the rest\n// were saved. Any other error means none of the batch was saved. HubSpot documents that partial answer for batch\n// create only, so a batch refused as a whole (a 4xx that is not about the token or a limit) is sent again one contact\n// at a time after the loop: one bad value must not hold back the other 99.\nconst r = $input.first().json;\nconst ids = ((r.request && r.request.inputs) || []).map(i => String(i.id));\nlet okIds = [], failed = [];\nif (r.status === 200) {\n  okIds = ids;\n} else if (r.status === 207 && r.response) {\n  const refused = new Map();\n  for (const e of r.response.errors || []) {\n    const ctx = e.context || {};\n    for (const t of [...(ctx.objectWriteTraceId || []), ...(ctx.ids || [])]) refused.set(String(t).replace(/^contact-/, ''), e.message || e.category || 'refused');\n  }\n  const saved = new Set((r.response.results || []).map(x => String(x.id)));\n  for (const id of ids) {\n    if (refused.has(id)) failed.push({ id, message: refused.get(id) });\n    else if (saved.has(id)) okIds.push(id);\n    else failed.push({ id, message: 'missing from HubSpot\\'s answer' });\n  }\n} else {\n  failed = ids.map(id => ({ id, message: r.message }));\n}\nconst refusedAsWhole = r.status >= 400 && r.status < 500 && ![401, 403, 423, 429].includes(r.status) && ids.length > 1;\nreturn [{ json: { batchNo: r.batchNo, okIds, failed, attempts: r.attempts, statuses: r.statuses,\n  retryAlone: refusedAsWhole ? r.request.inputs : [] } }];\n"
+      }
+    },
+    {
+      "id": "c03dad07-52ba-58e3-81b4-fb8398fd7440",
+      "name": "Finish Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "// Counts what was really saved and moves the rotation forward to the last owner who actually got a contact.\n// A dry run saves nothing, not even the rotation.\nconst s = $('Run Settings').first().json;\nconst meta = $('Plan Updates').first().json.meta;\nconst results = $('Loop: Updates').isExecuted ? $('Loop: Updates').all(0).map(i => i.json) : [];\n// Contacts sent again one at a time (HubSpot refused their whole batch): their own answer replaces the batch's.\nconst alone = $('Record One by One').isExecuted ? $('Record One by One').first().json : { sent: [], okIds: [], failed: [] };\nconst sentAlone = new Set(alone.sent);\nconst live = !s.dryRun;\nconst okIds = new Set([...results.flatMap(r => r.okIds || []), ...alone.okIds]);\nconst failed = [...results.flatMap(r => (r.failed || []).filter(f => !sentAlone.has(f.id))), ...alone.failed];\nconst saved = id => !live || okIds.has(id);\n\nconst fixesDone = meta.fixes.filter(f => saved(f.id));\nconst assignmentsDone = meta.assignments.map(a => ({ ...a, ids: a.ids.filter(saved), names: a.names.filter((n, i) => saved(a.ids[i])) })).filter(a => a.ids.length);\nconst problems = [];\nif (failed.length) {\n  const names = Object.fromEntries([...meta.fixes.map(f => [f.id, f.name]), ...meta.assignments.flatMap(a => a.ids.map((id, i) => [id, a.names[i]]))]);\n  const byMessage = {};\n  for (const f of failed) (byMessage[f.message] = byMessage[f.message] || []).push(`${names[f.id] || 'record'} (${f.id})`);\n  for (const [message, who] of Object.entries(byMessage)) problems.push(`HubSpot did not save the update for ${who.length} contact(s): ${who.slice(0, 10).join(', ')}${who.length > 10 ? ' and more' : ''}: ${message}`);\n}\nif (live && assignmentsDone.length) {\n  const st = $getWorkflowStaticData('global');\n  st.rotation = { lastOwnerId: assignmentsDone[assignmentsDone.length - 1].ownerId, updatedAt: new Date().toISOString() };\n}\nconst failedIds = new Set(failed.map(f => f.id));\nconst after = { ...meta.after };\nafter.unowned += meta.assignments.reduce((n, a) => n + a.ids.filter(id => failedIds.has(id)).length, 0);\nafter.messy += meta.fixes.filter(f => failedIds.has(f.id)).reduce((n, f) => n + f.changes.length, 0);\nreturn [{ json: { fixesDone, assignmentsDone, failedCount: failed.length, problems, after } }];\n"
+      }
+    },
+    {
+      "id": "4e1f69ba-7eea-5103-94ca-158d91d90246",
+      "name": "Note: Ask",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1840,
+        800
+      ],
+      "parameters": {
+        "content": "## 6. Ask a person about close matches\nOne Slack message with an Approve and a Skip link per pair. Each link carries a token signed with APPROVAL_SECRET (HMAC SHA-256) that names the pair, the action, a one-time nonce and the expiry. The pairs are saved as waiting only after Slack accepted the message. Never in a dry run.",
+        "width": 1360,
+        "height": 1060,
+        "color": 7
+      }
+    },
+    {
+      "id": "f72806ce-74fd-55b6-809a-37e7d364ad0b",
+      "name": "Any New Pairs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        1240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "fb28e09a-1a4d-57fc-9bad-9a2f4276c99f",
+              "leftValue": "={{ $('Plan Cleanup').first().json.dryRun === false && $('Plan Cleanup').first().json.newPairs.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ebc8ab41-c141-5bfc-9c2d-0569be302203",
+      "name": "Approval Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2120,
+        1100
+      ],
+      "parameters": {
+        "jsCode": "// One Approve and one Skip link per close match. Each link carries a small signed token: the pair, the action, a\n// one-time nonce and the expiry time. The next node signs it with APPROVAL_SECRET (HMAC SHA-256), so a link cannot be\n// changed or made up. The nonce is saved with the pair only after Slack accepted the message.\nconst s = $('Run Settings').first().json;\nconst plan = $('Plan Cleanup').first().json;\nconst expires = Math.floor(Date.now() / 1000) + s.approvalHours * 3600;\nconst out = [];\nfor (const pr of plan.newPairs) {\n  const nonce = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);\n  for (const action of ['approve', 'skip']) {\n    const payload = { v: 1, a: action, k: pr.pairKey, p: pr.primaryId, s: pr.secondaryId, n: nonce, e: expires };\n    out.push({ json: { pairKey: pr.pairKey, action, nonce, expires, payloadPart: Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url') } });\n  }\n}\nreturn out;\n"
+      }
+    },
+    {
+      "id": "f7bf1f13-c353-52d1-8522-fd71caa7c197",
+      "name": "Crypto: Sign Links",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        2340,
+        1100
+      ],
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ $json.payloadPart }}",
+        "dataPropertyName": "sig",
+        "secret": "={{ $env.APPROVAL_SECRET }}",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "2362b733-0e05-5fd3-9496-79c5400da195",
+      "name": "Build Approval Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        1100
+      ],
+      "parameters": {
+        "jsCode": "// One Slack message for all new close matches, each with its Approve and Skip link. Contact data is escaped for\n// Slack (&, <, >), so a name like \"<!channel>\" shows as text and pings nobody.\nconst s = $('Run Settings').first().json;\nconst plan = $('Plan Cleanup').first().json;\nconst esc = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst plain = t => t.replace(/[\\u202f\\u00a0]/g, ' ');\nconst day = iso => { const d = new Date(iso); return isNaN(d) ? '' : plain(new Intl.DateTimeFormat('en-US', { timeZone: s.timezone, month: 'short', day: 'numeric', year: 'numeric' }).format(d)); };\nconst when = unix => plain(new Intl.DateTimeFormat('en-US', { timeZone: s.timezone, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(unix * 1000))) + ` (${s.timezone})`;\n// Contact values are cut to 150 characters, so one section stays within Slack's 3,000 character limit even when a\n// field holds a pasted note. The confirm page shows the full values.\nconst cut = t => { const v = String(t ?? ''); return v.length > 150 ? v.slice(0, 150).trimEnd() + '...' : v; };\nconst record = id => (s.portalId ? `<${s.hubspotApp}/contacts/${s.portalId}/record/0-1/${id}|record ${id}>` : `record ${id}`);\nconst describe = c => [esc(cut(c.name)), c.email && esc(cut(c.email)), c.phone && esc(cut(c.phone)), c.company && esc(cut(c.company)), c.created && `created ${day(c.created)}`]\n  .filter(Boolean).join(', ') + ` (${record(c.id)})`;\n\nconst links = {};\nfor (const it of $input.all().map(i => i.json)) {\n  const l = (links[it.pairKey] = links[it.pairKey] || {});\n  l[it.action] = `${s.approvalUrl}${s.approvalUrl.includes('?') ? '&' : '?'}token=${it.payloadPart}.${it.sig}`;\n  l.nonce = it.nonce;\n  l.expires = it.expires;\n}\nconst pairs = plan.newPairs.filter(pr => links[pr.pairKey] && links[pr.pairKey].approve && links[pr.pairKey].skip);\nconst n = pairs.length;\nconst expires = n ? links[pairs[0].pairKey].expires : 0;\nconst blocks = [{ type: 'section', text: { type: 'mrkdwn', text:\n  `*HubSpot: ${n} possible duplicate${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} a decision*\\n`\n  + `The links work until ${when(expires)}. Opening a link shows a confirm page, and nothing changes in HubSpot until you press the button there. HubSpot cannot undo a merge.` } }];\npairs.forEach((pr, i) => {\n  const l = links[pr.pairKey];\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text:\n    `*${i + 1}. ${esc(cut(pr.primary.name))}*: ${esc(pr.reason)}\\n`\n    + `Keep: ${describe(pr.primary)}\\n`\n    + `Merge in: ${describe(pr.secondary)}\\n`\n    + `<${l.approve}|Approve merge>  |  <${l.skip}|Skip>` } });\n});\nconst postedAt = new Date().toISOString();\nconst entries = {};\nfor (const pr of pairs) {\n  const l = links[pr.pairKey];\n  entries[pr.pairKey] = {\n    status: 'waiting', nonce: l.nonce, expiresAt: new Date(l.expires * 1000).toISOString(), postedAt,\n    primaryId: pr.primaryId, secondaryId: pr.secondaryId, reason: pr.reason, primary: pr.primary, secondary: pr.secondary,\n  };\n}\nreturn [{ json: {\n  text: `HubSpot: ${n} possible duplicate${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} a decision. Open this message in Slack to approve or skip each one.`,\n  blocks, entries, count: n,\n} }];\n"
+      }
+    },
+    {
+      "id": "69595a80-585a-54c1-ac43-361ac309f934",
+      "name": "Slack: Ask for Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2780,
+        1100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text, blocks: $json.blocks }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "014d1d4d-1eff-5aae-905e-dcb6009858a3",
+      "name": "Save Approvals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        1000
+      ],
+      "parameters": {
+        "jsCode": "// Slack accepted the message, so the pairs now wait for a decision. Only now are their nonces saved: a link from a\n// message that never arrived can never be used. Old decided entries are pruned after 60 days; skipped pairs are kept,\n// so they are never suggested again.\nconst msg = $('Build Approval Message').first().json;\nconst st = $getWorkflowStaticData('global');\nst.approvals = st.approvals || {};\nfor (const [key, entry] of Object.entries(msg.entries)) st.approvals[key] = entry;\nconst cutoff = Date.now() - 60 * 86400000;\nfor (const [key, e] of Object.entries(st.approvals)) {\n  if (e.status === 'skipped') continue;\n  const last = Date.parse(e.decidedAt || e.expiresAt || e.postedAt || '') || 0;\n  if (last && last < cutoff) delete st.approvals[key];\n}\nreturn [{ json: { posted: Object.keys(msg.entries).length } }];\n"
+      }
+    },
+    {
+      "id": "12a4b934-6d24-5896-9793-878f7c70a9fe",
+      "name": "Approval Post Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        1200
+      ],
+      "parameters": {
+        "jsCode": "// Slack refused the approval message. Nothing is saved, so the same pairs are posted again by the next run.\nconst e = $input.first().json.error || {};\nreturn [{ json: { message: `The approval request for ${$('Build Approval Message').first().json.count} close match(es) could not be posted to Slack (${e.message || e.description || 'unknown error'}), so nobody was asked. The next run posts them again.` } }];\n"
+      }
+    },
+    {
+      "id": "9609bd7e-801d-5007-ab09-16cf5b1cf8a3",
+      "name": "Note: Report",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3240,
+        800
+      ],
+      "parameters": {
+        "content": "## 7. Report\nOne Slack summary per run: merged, waiting for approval, fields fixed, owners assigned, before and after counts and every problem. Any problem (a failed merge, update or Slack post, a bad owner in the list) ends the run as failed after the summary, so the error workflow raises an alert and nothing half done goes unreported.",
+        "width": 1300,
+        "height": 1060,
+        "color": 7
+      }
+    },
+    {
+      "id": "f2b4e5a4-e84a-5471-9549-785059a12cb5",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "// One Slack message per run: what was merged, what waits for a person, which fields were fixed, who got which\n// contacts, the before and after counts and every problem. Contact data is escaped for Slack (&, <, >).\nconst s = $('Run Settings').first().json;\nconst plan = $('Plan Cleanup').first().json;\nconst fin = $('Finish Updates').first().json;\nconst meta = $('Plan Updates').first().json.meta;\nconst esc = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst live = !s.dryRun;\nconst prep = live && $('Prepare Merges').isExecuted ? $('Prepare Merges').first().json : null;\nconst skipped = [...((prep && prep.skipped) || [])];\n// Each merge as settled by the read after the merges (a merge whose answer was lost counts as done there).\nconst merges = live ? (meta.merges || []) : [];\nconst posted = $('Save Approvals').isExecuted ? $('Build Approval Message').first().json.count : 0;\nconst approvalFailed = $('Approval Post Failed').isExecuted ? $('Approval Post Failed').first().json.message : '';\nconst problems = [...plan.problems, ...meta.problems, ...fin.problems];\nconst warnings = [...plan.warnings, ...meta.warnings];\nconst plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;\nconst top = (list, n = 15) => list.length > n ? [...list.slice(0, n), `and ${list.length - n} more`] : list;\nconst lines = [];\n\nlines.push(live ? `*HubSpot cleanup* (${s.trigger})`\n  : `*HubSpot cleanup* (${s.trigger}) *DRY RUN*: nothing was changed. This is what a real run would do.`);\nconst after = fin.after;\nlines.push(`Before and after${live ? '' : ' (if run for real)'}: ${meta.before.contacts} to ${after.contacts} contacts, `\n  + `${meta.before.unowned} to ${after.unowned} without an owner, ${meta.before.messy} to ${after.messy} messy field values`);\n\n// ---------------------------------------------------------------- merges\nif (live) {\n  const groups = new Map();\n  for (const m of merges) { if (!groups.has(m.groupId)) groups.set(m.groupId, []); groups.get(m.groupId).push(m); }\n  const done = [];\n  for (const list of groups.values()) {\n    const ok = list.filter(m => m.outcome === 'merged');\n    const bad = list.filter(m => m.outcome === 'failed');\n    const gone = list.filter(m => m.outcome === 'already_merged');\n    if (ok.length) {\n      done.push(`${esc(list[0].primaryName)}: kept ${list[0].primaryId}, merged in ${ok.map(m => m.secondaryId).join(', ')} (${esc(list[0].reason)}), now record ${ok[ok.length - 1].newId}`);\n    }\n    for (const m of bad) {\n      problems.push(`Merge failed: ${m.secondaryName} (${m.secondaryId}) into ${m.primaryName} (${m.primaryNow})`\n        + (ok.length ? `, after ${plural(ok.length, 'other merge')} of this group worked` : '') + `: ${m.message} (${plural(m.attempts, 'try', 'tries')})`);\n    }\n    for (const m of gone) skipped.push({ ...m, why: m.message });\n  }\n  const mergedCount = merges.filter(m => m.outcome === 'merged').length;\n  lines.push(`Merged: ${plural(mergedCount, 'exact duplicate')}`);\n  for (const d of top(done)) lines.push(`\\u2022 ${d}`);\n  const confirmed = merges.filter(m => m.confirmedByRead).length;\n  if (confirmed) lines.push(`HubSpot answered ${plural(confirmed, 'merge')} with an error, but the records are now one when read again, so ${confirmed === 1 ? 'it counts' : 'they count'} as merged.`);\n} else {\n  lines.push(`Would merge: ${plural(plan.merges.length, 'exact duplicate')}`);\n  const byGroup = new Map();\n  for (const m of plan.merges) { if (!byGroup.has(m.groupId)) byGroup.set(m.groupId, []); byGroup.get(m.groupId).push(m); }\n  for (const d of top([...byGroup.values()].map(list => `${esc(list[0].primaryName)}: keep ${list[0].primaryId}, merge in ${list.map(m => m.secondaryId).join(', ')} (${esc(list[0].reason)})`))) lines.push(`\\u2022 ${d}`);\n}\nif (plan.deferredMerges) lines.push(s.maxMerges === 0\n  ? `Automatic merging is off (MAX_MERGES_PER_RUN is 0), so ${plural(plan.deferredMerges, 'exact duplicate')} ${plan.deferredMerges === 1 ? 'was' : 'were'} not merged.`\n  : `Not merged this run: ${plural(plan.deferredMerges, 'exact duplicate')} over the cap of ${s.maxMerges} (MAX_MERGES_PER_RUN). The next run continues.`);\nfor (const k of top(skipped)) lines.push(`Not merged: ${esc(k.secondaryName)} (${k.secondaryId}) and ${esc(k.primaryName)} (${k.primaryId}): ${esc(k.why)}`);\n\n// ---------------------------------------------------------------- approvals\nconst waitingBefore = plan.waitingCount;\nif (live) {\n  lines.push(`Waiting for approval: ${plural(posted + waitingBefore, 'close match', 'close matches')} (${posted} sent now, ${waitingBefore} from earlier runs)`);\n} else {\n  lines.push(`Would ask for approval: ${plural(plan.newPairs.length, 'close match', 'close matches')}${waitingBefore ? `, plus ${waitingBefore} already waiting` : ''}`);\n}\nif (plan.morePairs) lines.push(`${plural(plan.morePairs, 'more close match', 'more close matches')} will be sent in a later run (MAX_APPROVALS_PER_RUN is ${s.maxApprovals}).`);\nif (plan.postponedCount) lines.push(`${plural(plan.postponedCount, 'close match', 'close matches')} will be sent once their exact duplicates are merged.`);\nif (approvalFailed) problems.push(approvalFailed);\n\n// ---------------------------------------------------------------- fields\nconst fixed = live ? fin.fixesDone : meta.fixes;\nconst fieldCounts = {};\nfor (const f of fixed) for (const c of f.changes) fieldCounts[c.field] = (fieldCounts[c.field] || 0) + 1;\nconst fieldTotal = Object.values(fieldCounts).reduce((a, b) => a + b, 0);\nlines.push(`${live ? 'Fields fixed' : 'Would fix'}: ${fieldTotal}${fieldTotal ? ' (' + Object.entries(fieldCounts).map(([k, v]) => `${k} ${v}`).join(', ') + ')' : ''}`);\nif (meta.unmapped.length) {\n  lines.push(`Values not in the mapping table (left as they are): ${top(meta.unmapped.map(u => `${u.field} \"${esc(u.value)}\" (${u.count})`), 10).join(', ')}`);\n}\nif (meta.backward.length) {\n  lines.push(`Lifecycle stage kept for ${plural(meta.backward.length, 'contact')}: the text says an earlier stage, and HubSpot only moves lifecycle stage forward (${top(meta.backward.map(b => `${esc(b.name)}: ${esc(b.from)}`), 5).join(', ')})`);\n}\n\n// ---------------------------------------------------------------- owners\nconst assigned = live ? fin.assignmentsDone : meta.assignments;\nconst perOwner = {};\nfor (const a of assigned) perOwner[a.ownerName] = (perOwner[a.ownerName] || 0) + a.ids.length;\nconst assignedTotal = Object.values(perOwner).reduce((a, b) => a + b, 0);\nconst awayNames = (plan.ownerPool || []).filter(o => o.away).map(o => esc(o.name));\nlines.push(`${live ? 'Owners assigned' : 'Would assign owners'}: ${assignedTotal}${assignedTotal ? ' (' + Object.entries(perOwner).map(([k, v]) => `${esc(k)} ${v}`).join(', ') + ')' : ''}`\n  + (awayNames.length ? `. Away: ${awayNames.join(', ')}` : ''));\nconst u = meta.unassigned;\nif (u.ownedDuplicate) lines.push(`Left unowned: ${plural(u.ownedDuplicate, 'contact')} that ${u.ownedDuplicate === 1 ? 'duplicates' : 'duplicate'} a record with an owner (the merge keeps that owner).`);\nif (u.cap) lines.push(`Left for the next run: ${plural(u.cap, 'unowned contact')} over the cap of ${s.maxAssignments} (MAX_ASSIGNMENTS_PER_RUN).`);\nif (u.routingOff) lines.push(`Routing is off (ROUND_ROBIN_OWNERS is empty or MAX_ASSIGNMENTS_PER_RUN is 0): ${plural(u.routingOff, 'contact')} without an owner.`);\nif (u.nobodyAvailable) lines.push(`Nobody was available to take ${plural(u.nobodyAvailable, 'unowned contact')}.`);\n\nfor (const w of warnings) lines.push(`Note: ${esc(w)}`);\n// Problems are escaped once here: they reach Slack twice, in this summary and in the error alert of the failed run.\nconst safeProblems = problems.map(esc);\nlines.push(safeProblems.length ? `*Problems: ${safeProblems.length}*` : 'Problems: none');\nfor (const p of safeProblems) lines.push(`\\u2022 ${p}`);\n\nreturn [{ json: { text: lines.join('\\n'), problems: safeProblems } }];\n"
+      }
+    },
+    {
+      "id": "378c8142-4972-56f8-8a35-f8ce507b684f",
+      "name": "Slack: Run Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3520,
+        1240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "4548e7cc-5f07-54ad-968e-c02702ae0805",
+      "name": "Summary Not Posted",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3740,
+        1440
+      ],
+      "parameters": {
+        "jsCode": "// The report is the point of the run, so a summary Slack refused is a problem too: the run fails and n8n keeps it.\nconst e = $input.first().json.error || {};\nconst esc = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst problems = [...$('Build Summary').first().json.problems,\n  esc(`The Slack summary could not be posted (${e.message || e.description || 'unknown error'}). Check SLACK_WEBHOOK_URL. The full summary is in this run's Build Summary node.`)];\nreturn [{ json: { problems } }];\n"
+      }
+    },
+    {
+      "id": "3b35f4ac-a7c6-5a3e-9dbd-9cfcfdc09975",
+      "name": "Any Problems?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3960,
+        1240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "25a2eb58-3da1-5fb7-8f03-0a59ece69b5b",
+              "leftValue": "={{ ($('Summary Not Posted').isExecuted ? $('Summary Not Posted').first().json.problems : $('Build Summary').first().json.problems).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0f012da1-c6ed-5780-917f-2c31d3999f7d",
+      "name": "Stop: Cleanup Had Problems",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        4180,
+        1240
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'HubSpot cleanup finished with ' + ($('Summary Not Posted').isExecuted ? $('Summary Not Posted').first().json.problems : $('Build Summary').first().json.problems).length + ' problem(s): ' + ($('Summary Not Posted').isExecuted ? $('Summary Not Posted').first().json.problems : $('Build Summary').first().json.problems).join(' | ') }}"
+      }
+    },
+    {
+      "id": "56b5eb72-d40a-54fd-ad7b-b1848acd4c6e",
+      "name": "Note: Links",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        2100
+      ],
+      "parameters": {
+        "content": "## 8. Approval links\nOpening a link (GET) only shows a confirm page, so Slack previews and link scanners change nothing. The page's button sends a POST with the same token. Both check the signature (a forged link gets a 403 and an alert), the expiry (410) and that the pair still waits with this nonce (a used or replaced link gets a 409).",
+        "width": 1600,
+        "height": 1160,
+        "color": 7
+      }
+    },
+    {
+      "id": "3fa8e681-e2bd-50d9-9f3a-5f572c9de6af",
+      "name": "Approval Link",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2400
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "hubspot-merge-approval",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "2ab621be-e72a-5d7f-a5af-84ae0172b046"
+    },
+    {
+      "id": "28751831-a47e-57ff-b80f-716a01eb2e1c",
+      "name": "Approval Confirm",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        2600
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hubspot-merge-approval",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "135b3d7b-c37f-55d4-8d32-550a72ff6ec3"
+    },
+    {
+      "id": "ebfbd125-3b22-51db-af48-5cb6be33c075",
+      "name": "Read Approval Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        2500
+      ],
+      "parameters": {
+        "jsCode": "// Reads the token from an approval link (GET, from Slack) or from the confirm page's button (POST).\n// Only a POST can change anything; a GET only shows the confirm page, so link previews and scanners are harmless.\nconst isPost = $('Approval Confirm').isExecuted;\nconst req = (isPost ? $('Approval Confirm') : $('Approval Link')).first().json;\nconst raw = String((isPost ? (req.body || {}).token : (req.query || {}).token) || '').trim();\nconst m = /^([A-Za-z0-9_-]{16,4000})\\.([0-9a-f]{64})$/.exec(raw);\nlet payload = null;\nif (m) {\n  try { payload = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8')); } catch (e) { payload = null; }\n}\nconst valid = Boolean(payload && payload.v === 1 && ['approve', 'skip'].includes(payload.a) && typeof payload.k === 'string'\n  && /^\\d+$/.test(String(payload.p)) && /^\\d+$/.test(String(payload.s)) && typeof payload.n === 'string' && Number.isFinite(payload.e));\nreturn [{ json: { isPost, token: m ? raw : '', payloadPart: m ? m[1] : '', givenSig: m ? m[2] : '', payload: valid ? payload : null } }];\n"
+      }
+    },
+    {
+      "id": "dbc01c54-e09f-5f2f-bfd6-722200066328",
+      "name": "Crypto: Check Signature",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        440,
+        2500
+      ],
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ $json.payloadPart || 'none' }}",
+        "dataPropertyName": "expectedSig",
+        "secret": "={{ $env.APPROVAL_SECRET }}",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "93c8ebd3-0e93-5ff7-8281-9c15d0564f3c",
+      "name": "Check Approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        2500
+      ],
+      "parameters": {
+        "jsCode": "// Decides what an approval link may do. In this order:\n//   1. the signature must match (HMAC SHA-256 with APPROVAL_SECRET, compared in constant time), else 403 and an alert\n//   2. the link must not have expired (the expiry is inside the signed token), else 410\n//   3. the pair must still wait for a decision with this exact nonce, else 409 (used, or replaced by a newer link)\n//   4. DRY_RUN must be off, else nothing happens\n// A GET then only shows the confirm page. Only the POST from that page's button approves or skips.\nconst html = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst slack = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst page = (title, inner) => '<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">'\n  + '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"robots\" content=\"noindex\">'\n  + `<title>${html(title)}</title><style>`\n  + 'body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#1f2933;background:#fff;line-height:1.5}'\n  + 'h1{font-size:22px}.card{border:1px solid #d9e2ec;border-radius:8px;padding:12px 16px;margin:8px 0 16px}.muted{color:#52606d;font-size:14px}'\n  + 'button{font-size:16px;padding:10px 18px;border-radius:6px;border:0;background:#1f6feb;color:#fff;cursor:pointer}button.skip{background:#52606d}'\n  + `</style></head><body><h1>${html(title)}</h1>${inner}</body></html>`;\nconst tz = (() => { const z = String($env.REPORT_TIMEZONE || '').trim() || 'UTC'; try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch (e) { return 'UTC'; } })();\nconst plainSpaces = t => t.replace(/[\\u202f\\u00a0]/g, ' ');\nconst when = value => {\n  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);\n  if (isNaN(d)) return '';\n  return plainSpaces(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(d)) + ` (${tz})`;\n};\nconst t = $input.first().json;\nconst p = t.payload;\nconst secret = String($env.APPROVAL_SECRET || '');\nconst sameSig = (a, b) => {\n  if (typeof a !== 'string' || typeof b !== 'string' || !a.length || a.length !== b.length) return false;\n  let diff = 0;\n  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);\n  return diff === 0;\n};\nconst out = (route, httpStatus, title, inner, extra = {}) => [{ json: { route, httpStatus, html: page(title, inner), isPost: t.isPost, payload: p, ...extra } }];\n\nif (secret.length < 32 || !p || !sameSig(t.givenSig, String(t.expectedSig || '').toLowerCase())) {\n  const reason = secret.length < 32 ? 'APPROVAL_SECRET is shorter than 32 characters, so every approval link is refused'\n    : (p ? 'its signature does not match' : 'it is not a complete approval link');\n  return out('refused', 403, 'This link is not valid', '<p>This approval link was changed or did not come from the cleanup workflow, so nothing was done.</p>', { reason });\n}\nif (Date.now() / 1000 > p.e) {\n  return out('closed', 410, 'This link has expired', `<p>It expired on ${html(when(p.e))}. Nothing was done. If these records are still duplicates, the next nightly run sends a new link.</p>`);\n}\nconst st = $getWorkflowStaticData('global');\nconst entry = (st.approvals || {})[p.k];\nif (!entry || entry.nonce !== p.n || entry.primaryId !== String(p.p) || entry.secondaryId !== String(p.s)) {\n  return out('closed', 409, 'This link is no longer active', '<p>A newer link was sent for these records, or they no longer wait for a decision. Nothing was done.</p>');\n}\nif (entry.status !== 'waiting') {\n  const word = { merged: 'merged', already_merged: 'merged in HubSpot', deleted: 'removed from HubSpot', skipped: 'skipped' }[entry.status] || entry.status;\n  return out('closed', 409, `Already ${word}`, `<p>These records were already ${html(word)} on ${html(when(entry.decidedAt))}. This link can only be used once, so nothing was done.</p>`);\n}\nif (String($env.DRY_RUN || '').trim().toLowerCase() !== 'false') {\n  return out('closed', 409, 'Dry run is on', '<p>DRY_RUN is on, so approvals do not change HubSpot. Nothing was done. The link still works once DRY_RUN is set to false.</p>');\n}\nif (!t.isPost) {\n  const approve = p.a === 'approve';\n  const card = c => `<div class=\"card\"><strong>${html(c.name)}</strong><br>${[c.email, c.phone, c.company].filter(Boolean).map(html).join('<br>')}`\n    + `<div class=\"muted\">Record ${html(c.id)}${c.created ? `, created ${html(when(c.created).replace(/, \\d+:\\d+.*$/, ''))}` : ''}</div></div>`;\n  const inner = `<p class=\"muted\">Why they look like one person: ${html(entry.reason)}</p>`\n    + `<p>${approve ? 'Keep' : 'Record 1'}:</p>${card(entry.primary)}<p>${approve ? 'Merge into it' : 'Record 2'}:</p>${card(entry.secondary)}`\n    + (approve\n      ? '<p>HubSpot keeps the first record\\'s values, fills its empty fields from the second, adds the second email as an additional email and gives the merged record a new ID. A merge cannot be undone.</p>'\n      : '<p>Skipping means these two records will not be suggested as duplicates again. Nothing changes in HubSpot.</p>')\n    + `<form method=\"post\" action=\"${html(String($env.APPROVAL_WEBHOOK_URL || ''))}\"><input type=\"hidden\" name=\"token\" value=\"${html(t.token)}\">`\n    + `<button type=\"submit\"${approve ? '' : ' class=\"skip\"'}>${approve ? 'Merge these records' : 'Skip this pair'}</button></form>`\n    + `<p class=\"muted\">This link works until ${html(when(p.e))}.</p>`;\n  return out('confirm', 200, approve ? 'Merge these two contacts?' : 'Skip this pair?', inner);\n}\nreturn out(p.a, 200, '', '', { entry });\n"
+      }
+    },
+    {
+      "id": "beacf130-e31b-54b0-b974-33752790fdf3",
+      "name": "Route Approval",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        880,
+        2500
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "e11e9f27-240c-5ff6-b874-5b5567485e61",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "confirm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "confirm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "c654cd42-780b-501a-a353-e27527060c17",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "closed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "closed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "1dc97f42-0fe8-57ac-8083-9b65c560e8ce",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "skip",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "skip"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "26ea5e4a-f155-5107-9e0e-7245c2f4babc",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "approve",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "approve"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "a7f8bd85-d105-5445-bb50-ba7153b70f79",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "refused",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "refused"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      }
+    },
+    {
+      "id": "9e25b26f-7263-5f14-a0a6-2be4709bdbea",
+      "name": "Respond: Approval Page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        2300
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              },
+              {
+                "name": "Referrer-Policy",
+                "value": "no-referrer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "67bc2982-abfb-5235-896f-6104dbeb6862",
+      "name": "Respond: Link Refused",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        2840
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              },
+              {
+                "name": "Referrer-Policy",
+                "value": "no-referrer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "89f1c915-db10-565c-bebc-4404df9beeb0",
+      "name": "Stop: Forged Approval Link",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        2840
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'An approval link was refused because ' + $('Check Approval').first().json.reason + '. Nothing was changed. If nobody on the team changed a link by hand, someone may be guessing links.' }}"
+      }
+    },
+    {
+      "id": "feed0ebe-e864-519a-b9ff-13a18b5925fb",
+      "name": "Note: Decide",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        2100
+      ],
+      "parameters": {
+        "content": "## 9. Act on the decision\nSkip: the pair is remembered and never suggested again. Approve: both records are read again; if someone already merged them or one was deleted, nothing is merged. Otherwise they are merged (tried 3 times) and the decision is saved, so the link cannot be used again. If the merge call fails, both records are read again: one record means it went through; otherwise the pair keeps waiting, the page says so and the run fails for the alert. Each decision is posted to Slack.",
+        "width": 2000,
+        "height": 1160,
+        "color": 7
+      }
+    },
+    {
+      "id": "e0fb5869-7f31-5951-b6b2-1d033d6f9bd1",
+      "name": "Save Skip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1620,
+        2360
+      ],
+      "parameters": {
+        "jsCode": "// Skip: the pair is remembered as \"not the same person\" and never suggested again. HubSpot is not touched.\nconst html = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst slack = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst page = (title, inner) => '<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">'\n  + '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"robots\" content=\"noindex\">'\n  + `<title>${html(title)}</title><style>`\n  + 'body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#1f2933;background:#fff;line-height:1.5}'\n  + 'h1{font-size:22px}.card{border:1px solid #d9e2ec;border-radius:8px;padding:12px 16px;margin:8px 0 16px}.muted{color:#52606d;font-size:14px}'\n  + 'button{font-size:16px;padding:10px 18px;border-radius:6px;border:0;background:#1f6feb;color:#fff;cursor:pointer}button.skip{background:#52606d}'\n  + `</style></head><body><h1>${html(title)}</h1>${inner}</body></html>`;\nconst tz = (() => { const z = String($env.REPORT_TIMEZONE || '').trim() || 'UTC'; try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch (e) { return 'UTC'; } })();\nconst plainSpaces = t => t.replace(/[\\u202f\\u00a0]/g, ' ');\nconst when = value => {\n  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);\n  if (isNaN(d)) return '';\n  return plainSpaces(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(d)) + ` (${tz})`;\n};\nconst c = $input.first().json;\nconst st = $getWorkflowStaticData('global');\nconst entry = st.approvals[c.payload.k];\nentry.status = 'skipped';\nentry.decidedAt = new Date().toISOString();\nconst a = entry.primary, b = entry.secondary;\n// A decided pair keeps only record IDs in n8n's memory: names and emails are not needed any more.\nentry.primary = { id: entry.primaryId };\nentry.secondary = { id: entry.secondaryId };\nreturn [{ json: {\n  httpStatus: 200,\n  html: page('Skipped', `<p>${html(a.name)} (record ${html(entry.primaryId)}) and ${html(b.name)} (record ${html(entry.secondaryId)}) will not be suggested as duplicates again. Nothing was changed in HubSpot.</p>`),\n  note: `*Duplicate skipped*: ${slack(a.name)} (record ${entry.primaryId}) and ${slack(b.name)} (record ${entry.secondaryId}) are kept apart and will not be suggested again.`,\n} }];\n"
+      }
+    },
+    {
+      "id": "4bfaf5ca-57cd-542c-92d6-6d0fe7eaafd8",
+      "name": "Respond: Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1840,
+        2360
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              },
+              {
+                "name": "Referrer-Policy",
+                "value": "no-referrer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "1699bd8c-e3f6-5a8a-92b3-5be92a4d7db1",
+      "name": "HubSpot: Check Pair",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1620,
+        2580
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/read",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: ['email', 'firstname', 'lastname', 'hs_merged_object_ids'], propertiesWithHistory: [], inputs: [{ id: String($json.payload.p) }, { id: String($json.payload.s) }] }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "executeOnce": true
+    },
+    {
+      "id": "0cfbb438-75d9-5a12-807f-376154eee78e",
+      "name": "Check Pair",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        2580
+      ],
+      "parameters": {
+        "jsCode": "// Reads both records again right before merging. If someone merged them in HubSpot in the meantime, or one of them\n// was deleted, there is nothing to merge. If HubSpot answers the old ID of a record merged into a third one with the\n// record it now belongs to (community answers say it does; the docs do not say), that record is merged, because the\n// approval was about these people.\n// The same read runs again after a merge call that failed: one record then means the merge went through (the answer\n// was lost, or a second click merged them first); two records mean it did not.\nconst c = $('Check Approval').first().json;\nconst p = c.payload;\nconst mergeError = $('Merge Pair Error').isExecuted ? $('Merge Pair Error').first().json.mergeError : '';\nconst results = $input.first().json.results || [];\nconst history = r => String((r.properties || {}).hs_merged_object_ids || '').split(';').map(x => x.trim()).filter(Boolean);\nconst resolve = id => results.find(r => String(r.id) === id) || results.find(r => history(r).includes(id)) || null;\nconst keep = resolve(String(p.p)), other = resolve(String(p.s));\nlet outcome = 'merge';\nif (!keep || !other) outcome = 'deleted';\nelse if (String(keep.id) === String(other.id)) outcome = mergeError ? 'merged_after_error' : 'already_merged';\nelse if (mergeError) outcome = 'failed';\nreturn [{ json: { outcome, mergeError, primaryNow: keep ? String(keep.id) : null, secondaryNow: other ? String(other.id) : null, request: keep && other ? { primaryObjectId: String(keep.id), objectIdToMerge: String(other.id) } : null } }];\n"
+      }
+    },
+    {
+      "id": "fada3815-71cc-5c31-bdbc-58aad258d512",
+      "name": "Route Pair",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2060,
+        2580
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "037d8abf-a5c9-57be-b99d-7e8367d0e82e",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "merge",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "merge"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "fb53d35b-6f80-5cfe-bb46-58c767b16e0d",
+                    "leftValue": "={{ ['already_merged', 'merged_after_error', 'deleted'].includes($json.outcome) }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "done"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "a5aeceb2-1075-5dd5-bc2b-742c50db8be6",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "failed"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      }
+    },
+    {
+      "id": "5cb0d041-d970-5cb9-afcf-0d3b9a4121de",
+      "name": "HubSpot: Merge Pair",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2280,
+        2500
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/merge",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "34683edb-9fae-5684-8f4f-ace51c25d342",
+      "name": "Record Approved Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        2580
+      ],
+      "parameters": {
+        "jsCode": "// Saves the decision (the link can never be used again) and builds the page and the Slack note.\nconst html = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst slack = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst page = (title, inner) => '<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">'\n  + '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"robots\" content=\"noindex\">'\n  + `<title>${html(title)}</title><style>`\n  + 'body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#1f2933;background:#fff;line-height:1.5}'\n  + 'h1{font-size:22px}.card{border:1px solid #d9e2ec;border-radius:8px;padding:12px 16px;margin:8px 0 16px}.muted{color:#52606d;font-size:14px}'\n  + 'button{font-size:16px;padding:10px 18px;border-radius:6px;border:0;background:#1f6feb;color:#fff;cursor:pointer}button.skip{background:#52606d}'\n  + `</style></head><body><h1>${html(title)}</h1>${inner}</body></html>`;\nconst tz = (() => { const z = String($env.REPORT_TIMEZONE || '').trim() || 'UTC'; try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch (e) { return 'UTC'; } })();\nconst plainSpaces = t => t.replace(/[\\u202f\\u00a0]/g, ' ');\nconst when = value => {\n  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);\n  if (isNaN(d)) return '';\n  return plainSpaces(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(d)) + ` (${tz})`;\n};\nconst c = $('Check Approval').first().json;\n// The last read of the pair: before the merge, or after a merge call that failed.\nconst pair = $('Check Pair').first().json;\nconst st = $getWorkflowStaticData('global');\nconst entry = st.approvals[c.payload.k];\nlet outcome = pair.outcome, newId = '';\nif (outcome === 'merge') { outcome = 'merged'; newId = String($input.first().json.id); }     // HubSpot answered the merge\nelse if (outcome === 'merged_after_error') { outcome = 'merged'; newId = String(pair.primaryNow); }\nentry.status = outcome;\nentry.decidedAt = new Date().toISOString();\nconst a = entry.primary, b = entry.secondary;\nlet title, body, note;\nif (outcome === 'merged') {\n  entry.newId = newId;\n  title = 'Merged';\n  if (pair.outcome === 'merge') {\n    body = `<p>${html(b.name)} (record ${html(pair.secondaryNow)}) was merged into ${html(a.name)} (record ${html(pair.primaryNow)}). The merged record's ID is ${html(newId)}.</p>`;\n    note = `*Duplicate approved and merged*: ${slack(a.name)}. Kept record ${pair.primaryNow}, merged in ${pair.secondaryNow}, new record ID ${newId}.`;\n  } else {\n    body = `<p>HubSpot answered the merge with an error, but reading the records again shows ${html(b.name)} (record ${html(entry.secondaryId)}) and ${html(a.name)} (record ${html(entry.primaryId)}) are now one record, so the merge went through. The merged record's ID is ${html(newId)}.</p>`;\n    note = `*Duplicate approved and merged*: ${slack(a.name)}. Kept record ${entry.primaryId}, merged in ${entry.secondaryId}, new record ID ${newId}. HubSpot answered with an error, but reading the records again shows one record.`;\n  }\n} else if (outcome === 'already_merged') {\n  title = 'Already merged';\n  body = `<p>Someone already merged these records in HubSpot (both now point to record ${html(pair.primaryNow)}), so there was nothing to do.</p>`;\n  note = `*Duplicate approved, already merged*: ${slack(a.name)} (records ${entry.primaryId} and ${entry.secondaryId}) were merged in HubSpot before the link was used. Nothing else was done.`;\n} else {\n  title = 'Record not found';\n  body = '<p>One of the records is no longer in HubSpot (deleted, or merged away), so nothing was merged.</p>';\n  note = `*Duplicate approved, but a record is gone*: ${slack(a.name)} (record ${entry.primaryId}) or ${slack(b.name)} (record ${entry.secondaryId}) is no longer in HubSpot. Nothing was merged.`;\n}\n// A decided pair keeps only record IDs in n8n's memory: names and emails are not needed any more.\nentry.primary = { id: entry.primaryId };\nentry.secondary = { id: entry.secondaryId };\nreturn [{ json: { httpStatus: 200, html: page(title, body), note, outcome } }];\n"
+      }
+    },
+    {
+      "id": "c23e063e-3702-55c6-9ac3-945e270a922d",
+      "name": "Respond: Merge Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2720,
+        2580
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              },
+              {
+                "name": "Referrer-Policy",
+                "value": "no-referrer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "1d976e0e-dfbf-597e-8e74-10d3e863dc63",
+      "name": "Approval Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        2840
+      ],
+      "parameters": {
+        "jsCode": "// HubSpot did not answer or refused, after the retries, and (after a merge call) reading the records again still shows\n// two records or did not work. The pair keeps waiting, so the same link works again later.\nconst html = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst slack = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst page = (title, inner) => '<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">'\n  + '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"robots\" content=\"noindex\">'\n  + `<title>${html(title)}</title><style>`\n  + 'body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#1f2933;background:#fff;line-height:1.5}'\n  + 'h1{font-size:22px}.card{border:1px solid #d9e2ec;border-radius:8px;padding:12px 16px;margin:8px 0 16px}.muted{color:#52606d;font-size:14px}'\n  + 'button{font-size:16px;padding:10px 18px;border-radius:6px;border:0;background:#1f6feb;color:#fff;cursor:pointer}button.skip{background:#52606d}'\n  + `</style></head><body><h1>${html(title)}</h1>${inner}</body></html>`;\nconst tz = (() => { const z = String($env.REPORT_TIMEZONE || '').trim() || 'UTC'; try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch (e) { return 'UTC'; } })();\nconst plainSpaces = t => t.replace(/[\\u202f\\u00a0]/g, ' ');\nconst when = value => {\n  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);\n  if (isNaN(d)) return '';\n  return plainSpaces(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(d)) + ` (${tz})`;\n};\nconst c = $('Check Approval').first().json;\nconst mergeError = $('Merge Pair Error').isExecuted ? $('Merge Pair Error').first().json.mergeError : '';\nconst e = $input.first().json.error;\nconst readError = e ? (e.message || e.description || 'unknown error') : '';\nconst step = mergeError ? 'merge' : 'check';\nconst what = mergeError && readError ? `the merge call failed (${mergeError}) and the records could not be read again (${readError})`\n  : mergeError ? `the merge call failed (${mergeError}) and reading the records again shows they are still two`\n  : `the records could not be read from HubSpot (${readError || 'unknown error'})`;\nconst entry = c.entry;\nconst names = `${entry.primary.name} (record ${entry.primaryId}) and ${entry.secondary.name} (record ${entry.secondaryId})`;\nreturn [{ json: {\n  httpStatus: 502,\n  html: page('HubSpot did not confirm the merge', `<p>${step === 'merge' ? 'HubSpot did not confirm the merge' : 'The records could not be read from HubSpot'}, so this approval is not finished. `\n    + 'Open the records in HubSpot to check. If they are still two records, this link still works: try it again in a few minutes.</p>'),\n  stopMessage: slack(`An approved merge of ${names} did not go through: ${what}. The pair still waits for approval, so the same link can be used again. Check the records in HubSpot first.`),\n} }];\n"
+      }
+    },
+    {
+      "id": "dd3e8674-3f6c-5b41-b730-781a1262393e",
+      "name": "Respond: Merge Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2720,
+        2840
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": "={{ $json.httpStatus }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              },
+              {
+                "name": "Referrer-Policy",
+                "value": "no-referrer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "2ed54566-3dec-5cc8-bf89-44d88a30dcc4",
+      "name": "Stop: Approved Merge Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2940,
+        2840
+      ],
+      "parameters": {
+        "errorMessage": "={{ $('Approval Failed').first().json.stopMessage }}"
+      }
+    },
+    {
+      "id": "759b7b0c-1d8e-5922-ab5f-ecab879ee35b",
+      "name": "Slack: Decision Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3020,
+        2460
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.note }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "03895c44-375b-5a3b-b43d-82929081b87a",
+      "name": "Stop: Decision Note Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3240,
+        2560
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'The decision was saved, but its Slack note could not be posted: ' + ($json.error && $json.error.message ? $json.error.message : 'unknown error') + '. Check SLACK_WEBHOOK_URL.' }}"
+      }
+    },
+    {
+      "id": "03491c52-365f-50f3-8819-79d71570c238",
+      "name": "Merge Pair Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        2800
+      ],
+      "parameters": {
+        "jsCode": "// HubSpot refused the approved merge or did not answer, after 3 tries. Its answer may have been lost after it saved the\n// merge (a retry is then refused, because both IDs already belong to one record), or a second click merged them first.\n// So both records are read again before anything is reported.\nconst e = $input.first().json.error || {};\nreturn [{ json: { payload: $('Check Approval').first().json.payload, mergeError: e.message || e.description || 'unknown error' } }];\n"
+      }
+    },
+    {
+      "id": "03f4ae2c-5d6a-563c-bd47-6f5d22493f4d",
+      "name": "Plan One by One",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        1060
+      ],
+      "parameters": {
+        "jsCode": "// The contacts of a batch HubSpot refused as a whole go out again one at a time, so the valid ones are saved and the\n// refused ones are named. At most 100 per run, spaced out (HubSpot allows 100 requests per 10 seconds); the rest keep\n// the batch's error and wait for the next run.\nconst inputs = $input.all().flatMap(i => i.json.retryAlone || []);\nif (!inputs.length) return [{ json: { none: true } }];\nreturn inputs.slice(0, 100).map(input => ({ json: { id: String(input.id), request: { inputs: [input] } } }));\n"
+      }
+    },
+    {
+      "id": "633e36c2-9eb9-57d9-8dfe-489a49ef5e7c",
+      "name": "Any To Send Alone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        1060
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "57fbb5cd-c530-520f-bfe5-816cf0ae8071",
+              "leftValue": "={{ $json.none === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dda1b925-4343-5cff-a86a-e471995a0351",
+      "name": "HubSpot: Update One by One",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        1060
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.HUBSPOT_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "2842ea9d-305c-5e6b-8bbf-bb35b6b3e0ed",
+      "name": "Record One by One",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        1060
+      ],
+      "parameters": {
+        "jsCode": "// HubSpot's answer for each contact sent alone: saved, or refused with HubSpot's reason.\nconst sent = $('Plan One by One').all().map(i => i.json);\nconst answers = new Map();\n$input.all().forEach((it, i) => {\n  const p = it.pairedItem;\n  answers.set(p && !Array.isArray(p) && Number.isInteger(p.item) ? p.item : i, it.json || {});\n});\nconst okIds = [], failed = [];\nsent.forEach((s, i) => {\n  const a = answers.get(i) || {};\n  const status = Number(a.statusCode) || 0;\n  let body = a.body;\n  if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) { /* keep the text */ } }\n  if (status === 200) { okIds.push(s.id); return; }\n  const why = status === 0 ? `no answer from HubSpot (${(a.error && (a.error.message || a.error.description)) || 'connection failed'})`\n    : `${status} ${body && typeof body === 'object' ? (body.message || body.category || '') : String(body || '').slice(0, 200)}`.trim();\n  failed.push({ id: s.id, message: `${why} (sent alone after HubSpot refused its batch)` });\n});\nreturn [{ json: { sent: sent.map(s => s.id), okIds, failed } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Run Now": {
+      "main": [
+        [
+          {
+            "node": "Run Secret Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Secret Valid?": {
+      "main": [
+        [
+          {
+            "node": "Run Settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Run Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Run Refused": {
+      "main": [
+        [
+          {
+            "node": "Stop: Bad Run Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: Nightly": {
+      "main": [
+        [
+          {
+            "node": "Schedule On?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule On?": {
+      "main": [
+        [
+          {
+            "node": "Run Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Settings": {
+      "main": [
+        [
+          {
+            "node": "Route Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Run": {
+      "main": [
+        [
+          {
+            "node": "Respond: Run Started",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot: Get Owners",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Bad Settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: Bad Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Run Started": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Get Owners",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Bad Settings": {
+      "main": [
+        [
+          {
+            "node": "Stop: Bad Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Get Owners": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Read Properties",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: HubSpot Read Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Read Properties": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: List Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: HubSpot Read Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: List Contacts": {
+      "main": [
+        [
+          {
+            "node": "Plan Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: HubSpot Read Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Any Merges?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Merges?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Check Merge Records",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Plan Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Check Merge Records": {
+      "main": [
+        [
+          {
+            "node": "Prepare Merges",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: HubSpot Read Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Merges": {
+      "main": [
+        [
+          {
+            "node": "Anything To Merge?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything To Merge?": {
+      "main": [
+        [
+          {
+            "node": "Loop: Merges",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Plan Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop: Merges": {
+      "main": [
+        [
+          {
+            "node": "Reload Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Next Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next Merge": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Merge": {
+      "main": [
+        [
+          {
+            "node": "Check Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Merge": {
+      "main": [
+        [
+          {
+            "node": "Retry Merge?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Merge?": {
+      "main": [
+        [
+          {
+            "node": "Wait: Merge Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait: Merge Backoff": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Merge": {
+      "main": [
+        [
+          {
+            "node": "Loop: Merges",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reload Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Reload Survivors",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Plan Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Reload Survivors": {
+      "main": [
+        [
+          {
+            "node": "Plan Updates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Plan Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Updates": {
+      "main": [
+        [
+          {
+            "node": "Any Updates?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Updates?": {
+      "main": [
+        [
+          {
+            "node": "Loop: Updates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop: Updates": {
+      "main": [
+        [
+          {
+            "node": "Plan One by One",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot: Batch Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Batch Update": {
+      "main": [
+        [
+          {
+            "node": "Check Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Update": {
+      "main": [
+        [
+          {
+            "node": "Retry Update?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Update?": {
+      "main": [
+        [
+          {
+            "node": "Wait: Update Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait: Update Backoff": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Batch Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Update": {
+      "main": [
+        [
+          {
+            "node": "Loop: Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish Updates": {
+      "main": [
+        [
+          {
+            "node": "Any New Pairs?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any New Pairs?": {
+      "main": [
+        [
+          {
+            "node": "Approval Links",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Links": {
+      "main": [
+        [
+          {
+            "node": "Crypto: Sign Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crypto: Sign Links": {
+      "main": [
+        [
+          {
+            "node": "Build Approval Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Approval Message": {
+      "main": [
+        [
+          {
+            "node": "Slack: Ask for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Ask for Approval": {
+      "main": [
+        [
+          {
+            "node": "Save Approvals",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Approval Post Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Approvals": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Post Failed": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary": {
+      "main": [
+        [
+          {
+            "node": "Slack: Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Run Summary": {
+      "main": [
+        [
+          {
+            "node": "Any Problems?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summary Not Posted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summary Not Posted": {
+      "main": [
+        [
+          {
+            "node": "Any Problems?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Problems?": {
+      "main": [
+        [
+          {
+            "node": "Stop: Cleanup Had Problems",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Link": {
+      "main": [
+        [
+          {
+            "node": "Read Approval Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Confirm": {
+      "main": [
+        [
+          {
+            "node": "Read Approval Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Approval Token": {
+      "main": [
+        [
+          {
+            "node": "Crypto: Check Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crypto: Check Signature": {
+      "main": [
+        [
+          {
+            "node": "Check Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Approval": {
+      "main": [
+        [
+          {
+            "node": "Route Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Approval": {
+      "main": [
+        [
+          {
+            "node": "Respond: Approval Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Approval Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save Skip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot: Check Pair",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Link Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Link Refused": {
+      "main": [
+        [
+          {
+            "node": "Stop: Forged Approval Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Skip": {
+      "main": [
+        [
+          {
+            "node": "Respond: Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Skipped": {
+      "main": [
+        [
+          {
+            "node": "Slack: Decision Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Check Pair": {
+      "main": [
+        [
+          {
+            "node": "Check Pair",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Approval Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Pair": {
+      "main": [
+        [
+          {
+            "node": "Route Pair",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Merge Pair": {
+      "main": [
+        [
+          {
+            "node": "Record Approved Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Pair Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Approved Merge": {
+      "main": [
+        [
+          {
+            "node": "Respond: Merge Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Merge Result": {
+      "main": [
+        [
+          {
+            "node": "Slack: Decision Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Decision Note": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Stop: Decision Note Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Failed": {
+      "main": [
+        [
+          {
+            "node": "Respond: Merge Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Merge Failed": {
+      "main": [
+        [
+          {
+            "node": "Stop: Approved Merge Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Pair": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Merge Pair",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Approved Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Approval Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Pair Error": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Check Pair",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan One by One": {
+      "main": [
+        [
+          {
+            "node": "Any To Send Alone?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any To Send Alone?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Update One by One",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Update One by One": {
+      "main": [
+        [
+          {
+            "node": "Record One by One",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record One by One": {
+      "main": [
+        [
+          {
+            "node": "Finish Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -24,7 +24,7 @@ parameters or body fields, page sizes over 100, batch inputs over 100, missing r
 unknown properties, invalid dropdown options and owner IDs, lifecycle stages moved backward, duplicate IDs in a batch,
 and more than 100 requests in 10 seconds.
 
-Three behaviors are not stated in HubSpot's docs, so the mock can answer either way and the test runs both:
+Three behaviors are not stated in HubSpot's docs. The mock can answer the first two either way, and the test runs both:
   - a request with a record ID retired by a merge: by default it leads to the merged record (what HubSpot community
     answers describe); FAIL['old_ids_missing'] answers it as not found instead,
   - a batch update with one invalid input: by default the valid inputs are saved and a 207 names the refused one by its

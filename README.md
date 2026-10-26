@@ -30,12 +30,13 @@ flowchart LR
     B -->|no| X[401 or 500, and an alert]
     B -->|yes| C[Read owners, property definitions, all contacts]
     C --> D[Find exact and close matches, plan merges up to the cap]
-    D -->|dry run| U
+    D -->|dry run, or nothing to merge| U
     D -->|merges planned| E[Read those records again]
     E --> F[Merge one at a time, back off on 429 and 5xx]
     F --> G[Read the merged records, and both records of any merge HubSpot refused]
     G --> U[Plan field fixes and owners]
-    U -->|live| V[Batch update: only changed properties]
+    U -->|live, changes to send| V[Batch update: only changed properties]
+    U -->|live, nothing to change| W
     V -->|batch refused as a whole| O[Send its contacts one at a time]
     O --> W
     V --> W{New close matches?}
